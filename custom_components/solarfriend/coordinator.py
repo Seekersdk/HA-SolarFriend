@@ -584,6 +584,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         sensor_map: dict[str, str] = {
             "pv_power":      cfg.get("pv_power_sensor", ""),
+            "pv2_power":     cfg.get("pv2_power_sensor", ""),
             "grid_power":    cfg.get("grid_power_sensor", ""),
             "battery_soc":   cfg.get("battery_soc_sensor", ""),
             "battery_power": cfg.get("battery_power_sensor", ""),
@@ -609,8 +610,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         if unavailable:
             data.unavailable = unavailable
 
-        # Populate raw readings
-        data.pv_power      = readings.get("pv_power", 0.0)
+        # Populate raw readings — sum PV1 + PV2 if both are configured
+        data.pv_power      = readings.get("pv_power", 0.0) + readings.get("pv2_power", 0.0)
         data.grid_power    = readings.get("grid_power", 0.0)
         data.battery_soc   = readings.get("battery_soc", 0.0)
         data.battery_power = readings.get("battery_power", 0.0)

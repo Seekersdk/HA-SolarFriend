@@ -24,6 +24,7 @@ from .const import DOMAIN
 
 # Config entry keys
 CONF_PV_POWER_SENSOR = "pv_power_sensor"
+CONF_PV2_POWER_SENSOR = "pv2_power_sensor"
 CONF_GRID_POWER_SENSOR = "grid_power_sensor"
 CONF_BATTERY_SOC_SENSOR = "battery_soc_sensor"
 CONF_BATTERY_POWER_SENSOR = "battery_power_sensor"
@@ -57,7 +58,8 @@ SOLCAST_SENSOR = "sensor.solcast_pv_forecast_forecast_today"
 # klatremis/esphome-for-deye entity_id suffixes — work for any device_type prefix
 # (e.g. sun12k, deye12, myinverter, ...)
 _KLATREMIS_SENSOR_SUFFIXES: dict[str, list[str]] = {
-    CONF_PV_POWER_SENSOR:      ["_pv1_power", "_pv2_power"],
+    CONF_PV_POWER_SENSOR:      ["_pv1_power"],
+    CONF_PV2_POWER_SENSOR:     ["_pv2_power"],
     CONF_GRID_POWER_SENSOR:    ["_total_grid_power"],
     CONF_BATTERY_SOC_SENSOR:   ["_battery_capacity"],
     CONF_BATTERY_POWER_SENSOR: ["_battery_output_power"],
@@ -448,9 +450,14 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             guess = guesses.get(conf_key)
             return vol.Required(conf_key, default=guess) if guess in power_sensors else vol.Required(conf_key)
 
+        def _opt(conf_key: str) -> vol.Optional:
+            guess = guesses.get(conf_key)
+            return vol.Optional(conf_key, default=guess) if guess in power_sensors else vol.Optional(conf_key)
+
         schema = vol.Schema(
             {
                 _req(CONF_PV_POWER_SENSOR):      vol.In(power_sensors),
+                _opt(CONF_PV2_POWER_SENSOR):     vol.In(power_sensors),
                 _req(CONF_GRID_POWER_SENSOR):    vol.In(power_sensors),
                 _req(CONF_BATTERY_SOC_SENSOR):   vol.In(power_sensors),
                 _req(CONF_BATTERY_POWER_SENSOR): vol.In(power_sensors),
