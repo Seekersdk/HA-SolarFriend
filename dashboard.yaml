@@ -1,0 +1,272 @@
+views:
+  - type: masonry
+    sections: []
+    cards:
+      - type: custom:power-flow-card-plus
+        entities:
+          grid:
+            entity: sensor.sun12k_total_grid_power
+            name: Net
+          solar:
+            entity: sensor.sun12k_total_pv_power
+            name: Sol
+          battery:
+            entity: sensor.sun12k_battery_output_power
+            name: Batteri
+            state_of_charge: sensor.sun12k_battery_capacity
+          home:
+            entity: sensor.sun12k_load_totalpower
+            name: Forbrug
+        watts_threshold: 10
+        min_flow_rate: 0.75
+        max_flow_rate: 6
+        w_decimals: 0
+        kw_decimals: 2
+      - type: custom:apexcharts-card
+        header:
+          title: ⚡ Spotpris i dag & i morgen
+          show: true
+        graph_span: 48h
+        span:
+          start: day
+        now:
+          show: true
+          label: Nu
+        apex_config:
+          chart:
+            height: 250
+          tooltip:
+            shared: true
+          annotations:
+            yaxis:
+              - 'y': 0.5
+                borderColor: '#FFA500'
+                label:
+                  text: Charge threshold
+                  style:
+                    color: '#FFA500'
+        yaxis:
+          - id: price
+            min: auto
+            max: auto
+            decimals: 2
+        series:
+          - entity: sensor.energi_data_service
+            name: Pris i dag
+            color: '#4FC3F7'
+            type: column
+            yaxis_id: price
+            data_generator: |
+              const raw = entity.attributes.raw_today || [];
+              return raw.map(r => [
+                new Date(r.hour).getTime(),
+                Math.round(r.price * 100) / 100
+              ]);
+          - entity: sensor.energi_data_service
+            name: Pris i morgen
+            color: '#90CAF9'
+            opacity: 0.6
+            type: column
+            yaxis_id: price
+            data_generator: |
+              const raw = entity.attributes.raw_tomorrow || [];
+              return raw.map(r => [
+                new Date(r.hour).getTime(),
+                Math.round(r.price * 100) / 100
+              ]);
+      - type: custom:apexcharts-card
+        header:
+          title: ☀️ SolarFriend — Dagsoverblik
+          show: true
+        graph_span: 1d
+        span:
+          start: day
+        now:
+          show: true
+          label: Nu
+        apex_config:
+          chart:
+            height: 450
+          tooltip:
+            shared: true
+        yaxis:
+          - id: power
+            min: 0
+            max: 5500
+          - id: soc
+            opposite: true
+            min: 0
+            max: 100
+        series:
+          - entity: sensor.solcast_pv_forecast_forecast_today
+            name: Forventet sol
+            color: '#FFD700'
+            opacity: 0.3
+            type: area
+            yaxis_id: power
+            data_generator: |
+              const forecast = entity.attributes.detailedHourly || [];
+              return forecast.map(f => [
+                new Date(f.period_start).getTime(),
+                Math.round(f.pv_estimate * 1000)
+              ]);
+          - entity: sensor.solarfriend_consumption_profile_chart
+            name: Forventet forbrug
+            color: '#FF6B6B'
+            opacity: 0.3
+            type: area
+            yaxis_id: power
+            data_generator: |
+              const profile = entity.attributes.hourly_profile || [];
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return profile.map((watt, hour) => [
+                today.getTime() + hour * 3600000,
+                watt
+              ]);
+          - entity: sensor.solarfriend_forecast_soc_chart
+            name: Forventet batteri ladning
+            color: '#4FC3F7'
+            opacity: 0.25
+            type: area
+            yaxis_id: power
+            data_generator: |
+              const profile = entity.attributes.hourly_power || [];
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return profile
+                .map((w, hour) => w !== null ? [
+                  today.getTime() + hour * 3600000,
+                  w < 0 ? Math.abs(w) : 0
+                ] : null)
+                .filter(v => v !== null);
+          - entity: sensor.solarfriend_forecast_soc_chart
+            name: Forventet batteri afladning
+            color: '#0288D1'
+            opacity: 0.25
+            type: area
+            yaxis_id: power
+            data_generator: |
+              const profile = entity.attributes.hourly_power || [];
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return profile
+                .map((w, hour) => w !== null ? [
+                  today.getTime() + hour * 3600000,
+                  w > 0 ? w : 0
+                ] : null)
+                .filter(v => v !== null);
+          - entity: sensor.solarfriend_pv_power
+            name: Faktisk sol
+            color: '#FFA500'
+            type: line
+            stroke_width: 2
+            extend_to: false
+            yaxis_id: power
+            statistics:
+              type: mean
+              period: 5minute
+              align: middle
+          - entity: sensor.solarfriend_load_power
+            name: Faktisk forbrug
+            color: '#FF4444'
+            type: line
+            stroke_width: 2
+            extend_to: false
+            yaxis_id: power
+            statistics:
+              type: mean
+              period: 5minute
+              align: middle
+          - entity: sensor.solarfriend_battery_power
+            name: Faktisk batteri ladning
+            color: '#29B6F6'
+            type: line
+            stroke_width: 2
+            extend_to: false
+            yaxis_id: power
+            transform: 'return x < 0 ? Math.abs(x) : 0;'
+            statistics:
+              type: mean
+              period: 5minute
+              align: middle
+          - entity: sensor.solarfriend_battery_power
+            name: Faktisk batteri afladning
+            color: '#0277BD'
+            type: line
+            stroke_width: 2
+            extend_to: false
+            yaxis_id: power
+            transform: 'return x > 0 ? x : 0;'
+            statistics:
+              type: mean
+              period: 5minute
+              align: middle
+          - entity: sensor.solarfriend_battery_soc
+            name: Batteri SOC faktisk
+            color: '#00C853'
+            type: line
+            stroke_width: 2
+            extend_to: false
+            yaxis_id: soc
+            statistics:
+              type: mean
+              period: 5minute
+              align: middle
+          - entity: sensor.solarfriend_forecast_soc_chart
+            name: Batteri SOC forventet
+            color: '#69F0AE'
+            type: line
+            stroke_width: 1
+            stroke_dash: 5
+            yaxis_id: soc
+            data_generator: |
+              const profile = entity.attributes.hourly_soc || [];
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return profile
+                .map((soc, hour) => soc !== null ? [
+                  today.getTime() + hour * 3600000, soc
+                ] : null)
+                .filter(v => v !== null);
+      - type: vertical-stack
+        cards:
+          - type: entities
+            title: 🧠 Optimizer Status
+            entities:
+              - entity: sensor.solarfriend_optimizer_strategy
+                name: Strategi
+              - entity: sensor.solarfriend_optimizer_expected_saving
+                name: Forventet besparelse
+              - entity: sensor.solarfriend_optimizer_cheapest_charge_hour
+                name: Billigste ladetime
+              - entity: sensor.solarfriend_optimizer_target_soc
+                name: Mål SOC
+              - entity: sensor.solarfriend_optimizer_morning_need
+                name: Morgenbehov
+          - type: entities
+            title: 💰 Besparelser
+            entities:
+              - entity: sensor.solarfriend_sparet_pa_sol_i_dag
+                name: Sol sparet i dag
+              - entity: sensor.solarfriend_sparet_via_optimering_i_dag
+                name: Optimering sparet i dag
+              - entity: sensor.solarfriend_total_sparet_pa_sol
+                name: Total sol sparet
+              - entity: sensor.solarfriend_total_sparet_via_optimering
+                name: Total optimering sparet
+          - type: entities
+            title: 🔋 Batteri
+            entities:
+              - entity: sensor.solarfriend_battery_soc
+                name: SOC
+              - entity: sensor.solarfriend_battery_energy
+                name: Energi
+              - entity: sensor.solarfriend_battery_usable_energy
+                name: Brugbar energi
+              - entity: sensor.solarfriend_battery_solar_fraction
+                name: Sol-andel
+              - entity: sensor.solarfriend_battery_weighted_cost
+                name: Gennemsnit pris/kWh
+              - entity: sensor.solarfriend_charge_threshold
+                name: Charge threshold
