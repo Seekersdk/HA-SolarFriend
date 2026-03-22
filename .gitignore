@@ -36,3 +36,4 @@ custom_components/solcast_solar/
 custom_components/energidataservice/ 
 custom_components/easee/ 
 custom_components/hacs/ 
+.claude/ 
