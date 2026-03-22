@@ -57,7 +57,7 @@ SOLCAST_SENSOR = "sensor.solcast_pv_forecast_forecast_today"
 # klatremis/esphome-for-deye entity_id suffixes — work for any device_type prefix
 # (e.g. sun12k, deye12, myinverter, ...)
 _KLATREMIS_SENSOR_SUFFIXES: dict[str, list[str]] = {
-    CONF_PV_POWER_SENSOR:      ["_total_pv_power", "_pv1_power"],
+    CONF_PV_POWER_SENSOR:      ["_pv1_power", "_pv2_power"],
     CONF_GRID_POWER_SENSOR:    ["_total_grid_power"],
     CONF_BATTERY_SOC_SENSOR:   ["_battery_capacity"],
     CONF_BATTERY_POWER_SENSOR: ["_battery_output_power"],
@@ -67,9 +67,9 @@ _KLATREMIS_SENSOR_SUFFIXES: dict[str, list[str]] = {
 _KLATREMIS_CONTROL_SUFFIXES: dict[str, tuple[str, list[str]]] = {
     CONF_DEYE_GRID_CHARGE_SWITCH:    ("switch", ["_grid_charge"]),
     CONF_DEYE_TIME_OF_USE_SWITCH:    ("switch", ["_time_of_use"]),
-    CONF_DEYE_TIME_POINT_1_ENABLE:   ("switch", ["_time_point_1_charge_enable"]),
-    CONF_DEYE_TIME_POINT_1_START:    ("number", ["_time_point_1_start"]),
-    CONF_DEYE_TIME_POINT_1_CAPACITY: ("number", ["_time_point_1_capacity"]),
+    CONF_DEYE_TIME_POINT_1_ENABLE:   ("switch", ["_time_point_1-6_charge_enable"]),
+    CONF_DEYE_TIME_POINT_1_START:    ("number", ["_time_point_1-6_start"]),
+    CONF_DEYE_TIME_POINT_1_CAPACITY: ("number", ["_time_point_1-6_capacity"]),
     CONF_DEYE_GRID_CHARGE_CURRENT:   ("number", ["_maximum_battery_grid_charge_current", "_grid_charge_current"]),
     CONF_DEYE_ENERGY_PRIORITY:       ("select", ["_energy_priority"]),
 }
