@@ -179,6 +179,80 @@ def _match_by_pattern(
     return result
 
 
+def _get_deye_device_sensors(hass: HomeAssistant) -> dict[str, str]:
+    """Return all sensors belonging to an ESPHome/Deye device in the device registry.
+
+    Falls back to entity_id keyword matching if no device is found via registry.
+    Returns {entity_id: 'friendly_name (entity_id)'} for all sensor domains.
+    """
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+
+    esphome_device_ids: set[str] = {
+        dev.id
+        for dev in dev_reg.devices.values()
+        if any(
+            kw in (part or "").lower()
+            for part in (dev.manufacturer, dev.model, dev.name, str(dev.entry_type))
+            for kw in ("deye", "esphome", "sun12k", "klatremis")
+        )
+    }
+
+    result: dict[str, str] = {}
+    for entity in ent_reg.entities.values():
+        if entity.domain != "sensor":
+            continue
+        in_device = entity.device_id in esphome_device_ids
+        in_keyword = any(kw in entity.entity_id for kw in ("deye", "sun12k", "esphome", "klatremis"))
+        if not (in_device or in_keyword):
+            continue
+        state = hass.states.get(entity.entity_id)
+        name = (
+            (state.attributes.get("friendly_name") if state else None)
+            or entity.name
+            or entity.original_name
+            or entity.entity_id
+        )
+        result[entity.entity_id] = f"{name} ({entity.entity_id})"
+
+    return dict(sorted(result.items(), key=lambda x: x[1]))
+
+
+def _get_deye_device_entities(hass: HomeAssistant, *domains: str) -> dict[str, str]:
+    """Return switch/number/select entities from the ESPHome/Deye device."""
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+
+    esphome_device_ids: set[str] = {
+        dev.id
+        for dev in dev_reg.devices.values()
+        if any(
+            kw in (part or "").lower()
+            for part in (dev.manufacturer, dev.model, dev.name, str(dev.entry_type))
+            for kw in ("deye", "esphome", "sun12k", "klatremis")
+        )
+    }
+
+    result: dict[str, str] = {}
+    for entity in ent_reg.entities.values():
+        if entity.domain not in domains:
+            continue
+        in_device = entity.device_id in esphome_device_ids
+        in_keyword = any(kw in entity.entity_id for kw in ("deye", "sun12k", "esphome", "klatremis"))
+        if not (in_device or in_keyword):
+            continue
+        state = hass.states.get(entity.entity_id)
+        name = (
+            (state.attributes.get("friendly_name") if state else None)
+            or entity.name
+            or entity.original_name
+            or entity.entity_id
+        )
+        result[entity.entity_id] = f"{name} ({entity.entity_id})"
+
+    return dict(sorted(result.items(), key=lambda x: x[1]))
+
+
 def _get_sensors_by_device_class(
     hass: HomeAssistant, *device_classes: str
 ) -> dict[str, str]:
@@ -354,9 +428,16 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
 
-        power_sensors = await self.hass.async_add_executor_job(
-            _get_sensors_by_device_class, self.hass, "power", "battery"
-        )
+        # For klatremis: only show sensors from the Deye/ESPHome device.
+        # Fall back to all power/battery sensors if none found.
+        if self._data.get(CONF_INVERTER_TYPE) == "deye_klatremis":
+            power_sensors = await self.hass.async_add_executor_job(
+                _get_deye_device_sensors, self.hass
+            )
+        if not power_sensors:
+            power_sensors = await self.hass.async_add_executor_job(
+                _get_sensors_by_device_class, self.hass, "power", "battery"
+            )
         guesses = _guess_deye_sensors(self.hass)
 
         if user_input is not None:
@@ -583,15 +664,24 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
                 data=self._data,
             )
 
-        switch_entities = await self.hass.async_add_executor_job(
-            _get_entities_by_domain, self.hass, "switch"
-        )
-        number_entities = await self.hass.async_add_executor_job(
-            _get_entities_by_domain, self.hass, "number"
-        )
-        select_entities = await self.hass.async_add_executor_job(
-            _get_entities_by_domain, self.hass, "select"
-        )
+        # For klatremis: only show entities from the Deye/ESPHome device.
+        if self._data.get(CONF_INVERTER_TYPE) == "deye_klatremis":
+            deye_entities = await self.hass.async_add_executor_job(
+                _get_deye_device_entities, self.hass, "switch", "number", "select"
+            )
+            switch_entities = {k: v for k, v in deye_entities.items() if k.startswith("switch.")}
+            number_entities = {k: v for k, v in deye_entities.items() if k.startswith("number.")}
+            select_entities = {k: v for k, v in deye_entities.items() if k.startswith("select.")}
+        else:
+            switch_entities = await self.hass.async_add_executor_job(
+                _get_entities_by_domain, self.hass, "switch"
+            )
+            number_entities = await self.hass.async_add_executor_job(
+                _get_entities_by_domain, self.hass, "number"
+            )
+            select_entities = await self.hass.async_add_executor_job(
+                _get_entities_by_domain, self.hass, "select"
+            )
         guesses = _guess_deye_control_entities(self.hass)
 
         def _opt_switch(conf_key: str) -> vol.Optional:
