@@ -1,0 +1,775 @@
+"""SolarFriend DataUpdateCoordinator."""
+from __future__ import annotations
+
+import logging
+import statistics
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, Callable
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, Event, callback
+from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as ha_dt
+
+from .const import DOMAIN
+from .consumption_profile import ConsumptionProfile
+from .battery_tracker import BatteryTracker
+from .battery_optimizer import BatteryOptimizer, OptimizeResult
+from .forecast_adapter import ForecastAdapter, ForecastData, get_forecast_for_period
+from .inverter_controller import InverterController
+
+_LOGGER = logging.getLogger(__name__)
+
+UPDATE_INTERVAL = timedelta(seconds=30)
+
+# Battery strategy thresholds
+PRICE_SURPLUS_FACTOR = 1.20   # price > avg * 1.20 → USE_BATTERY
+PRICE_CHEAP_FACTOR = 0.80     # price < avg * 0.80 → CHARGE_GRID
+
+# Rolling window for price average (number of samples kept)
+PRICE_HISTORY_MAX = 48        # ~24 min at 30 s interval
+
+# Night hours used for charge-threshold calculation (22:00–06:00)
+NIGHT_HOURS: frozenset[int] = frozenset(range(22, 24)) | frozenset(range(0, 7))
+
+# Minimum SOC change (%) that triggers a re-optimize
+SOC_TRIGGER_DELTA = 5.0
+
+# Minimum interval between optimizer runs triggered by an event
+OPTIMIZE_MIN_INTERVAL = timedelta(minutes=5)
+
+# Battery power sign convention (Deye via ESPHome):
+#   battery_power > 0  → discharging (leverer strøm)
+#   battery_power < 0  → charging   (modtager strøm)
+_BATTERY_NOISE_W = 50  # ignore changes below this threshold
+
+
+@dataclass
+class SolarFriendData:
+    # Raw sensor readings
+    pv_power: float = 0.0
+    grid_power: float = 0.0
+    battery_soc: float = 0.0
+    battery_power: float = 0.0
+    load_power: float = 0.0
+    price: float = 0.0
+    forecast: float = 0.0
+
+    # Derived values
+    solar_surplus: float = 0.0
+    battery_strategy: str = "IDLE"
+    price_level: str = "NORMAL"
+
+    # Battery economics
+    battery_cost_per_kwh: float = 0.0
+    charge_threshold: float | None = None
+
+    # Consumption profile
+    profile_confidence: str = "LEARNING"
+    profile_days_collected: int = 0
+
+    # Optimizer result (None until first run)
+    optimize_result: OptimizeResult | None = None
+
+    # Forecast data snapshot (None until first optimizer run)
+    forecast_data: ForecastData | None = None
+
+    # Battery tracker snapshot (updated every poll cycle)
+    battery_solar_kwh: float = 0.0
+    battery_grid_kwh: float = 0.0
+    battery_weighted_cost: float = 0.0
+    battery_solar_fraction: float = 0.0  # 0.0–1.0
+
+    # Savings tracking
+    today_solar_direct_kwh: float = 0.0
+    today_solar_direct_saved_dkk: float = 0.0
+    today_optimizer_saved_dkk: float = 0.0
+    total_solar_direct_saved_dkk: float = 0.0
+    total_optimizer_saved_dkk: float = 0.0
+
+    # Hourly-forecast derived sensors
+    solar_next_2h: float = 0.0
+    solar_until_sunset: float = 0.0
+
+    # Consumption profile chart (24 hourly averages in W)
+    consumption_profile_chart: list[float] = field(default_factory=list)
+    consumption_profile_day_type: str = "weekday"
+
+    # Forecast SOC curve (24 values in %, None for past hours)
+    forecast_soc_chart: list = field(default_factory=list)
+
+    # Which sensors were unavailable this cycle
+    unavailable: list[str] = field(default_factory=list)
+
+
+class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
+    """Fetch and derive SolarFriend data on a fixed interval."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=UPDATE_INTERVAL,
+        )
+        self._entry = entry
+        self._price_history: list[float] = []
+        self._night_prices: dict[int, float] = {}  # hour → min price seen this night
+        self._profile = ConsumptionProfile()
+        self._last_profile_update: datetime | None = None
+
+        # BatteryTracker — initialised in async_startup
+        self._tracker: BatteryTracker | None = None
+
+        # BatteryOptimizer — instantiated in async_startup after tracker is ready
+        self._optimizer: BatteryOptimizer | None = None
+
+        # InverterController — instantiated in async_startup
+        self._inverter: InverterController | None = None
+
+        # Tracker tick state
+        self._prev_battery_power: float = 0.0
+        self._prev_update_time: datetime | None = None
+        self._last_tracker_save: datetime | None = None
+        self._last_soc_correction: datetime | None = None
+
+        # Optimizer state
+        self._last_optimize_dt: datetime | None = None
+        self._last_optimize_soc: float | None = None
+
+        # Battery sign convention check (runs once)
+        self._battery_sign_warned: bool = False
+
+        # Event listener unsubscribe handles
+        self._unsub_listeners: list[Callable[[], None]] = []
+
+    # ------------------------------------------------------------------
+    # Startup
+    # ------------------------------------------------------------------
+
+    async def async_startup(self) -> None:
+        """Load persisted state and register event listeners."""
+        await self._profile.async_load(self.hass)
+
+        battery_cost = float(self._entry.data.get("battery_cost_per_kwh", 0.0))
+        self._tracker = BatteryTracker(battery_cost)
+        await self._tracker.async_load(self.hass, self._entry)
+
+        self._optimizer = BatteryOptimizer(
+            config_entry=self._entry,
+            battery_tracker=self._tracker,
+            consumption_profile=self._profile,
+        )
+
+        self._inverter = InverterController.from_config(self.hass, self._entry)
+        if self._inverter.is_configured:
+            _LOGGER.info(
+                "InverterController: %s klar",
+                self._entry.data.get("inverter_type", "deye_klatremis"),
+            )
+        else:
+            _LOGGER.warning(
+                "InverterController: ingen Deye-entiteter konfigureret — styring deaktiveret"
+            )
+
+        self._register_event_listeners()
+
+    # ------------------------------------------------------------------
+    # Event listeners
+    # ------------------------------------------------------------------
+
+    def _register_event_listeners(self) -> None:
+        """Register state-change listeners for optimizer triggers."""
+        cfg = self._entry.data
+        watch_entities: list[str] = []
+
+        for key in ("price_sensor", "forecast_sensor"):
+            eid = cfg.get(key, "")
+            if eid:
+                watch_entities.append(eid)
+
+        # Solcast sensor (always watch — harmless if not installed)
+        watch_entities.append("sensor.solcast_pv_forecast_forecast_today")
+
+        watch_entities.append("sun.sun")
+
+        soc_sensor = cfg.get("battery_soc_sensor", "")
+        if soc_sensor:
+            watch_entities.append(soc_sensor)
+
+        for key in ("charge_rate_kw", "battery_min_soc", "battery_max_soc", "min_charge_saving"):
+            watch_entities.append(f"number.{key}")
+
+        if watch_entities:
+            unsub = async_track_state_change_event(
+                self.hass,
+                watch_entities,
+                self._async_on_relevant_state_change,
+            )
+            self._unsub_listeners.append(unsub)
+
+        _LOGGER.debug(
+            "BatteryOptimizer: registered event listeners for %d entities",
+            len(watch_entities),
+        )
+
+    @callback
+    def _async_on_relevant_state_change(self, event: Event) -> None:
+        """Called when a watched entity changes."""
+        entity_id: str = event.data.get("entity_id", "")
+        soc_sensor = self._entry.data.get("battery_soc_sensor", "")
+
+        if entity_id == "sensor.solcast_pv_forecast_forecast_today":
+            used, limit = 0, 0
+            try:
+                used_state  = self.hass.states.get("sensor.solcast_pv_forecast_api_used")
+                limit_state = self.hass.states.get("sensor.solcast_pv_forecast_api_limit")
+                if used_state and limit_state:
+                    used  = int(float(used_state.state))
+                    limit = int(float(limit_state.state))
+            except (ValueError, TypeError):
+                pass
+            _LOGGER.info(
+                "Solcast forecast opdateret — kører optimizer (API: %d/%d)",
+                used, limit,
+            )
+            self.hass.async_create_task(self._trigger_optimize(reason="solcast_updated"))
+            return
+
+        if entity_id == soc_sensor:
+            new_state = event.data.get("new_state")
+            if new_state is None or new_state.state in ("unavailable", "unknown", ""):
+                return
+            try:
+                new_soc = float(new_state.state)
+            except (ValueError, TypeError):
+                return
+            if self._last_optimize_soc is not None:
+                if abs(new_soc - self._last_optimize_soc) < SOC_TRIGGER_DELTA:
+                    return
+
+        self.hass.async_create_task(self._trigger_optimize("event", notify=True))
+
+    def unregister_listeners(self) -> None:
+        """Cancel all registered state-change listeners."""
+        for unsub in self._unsub_listeners:
+            unsub()
+        self._unsub_listeners.clear()
+
+    # ------------------------------------------------------------------
+    # Optimizer trigger
+    # ------------------------------------------------------------------
+
+    async def _trigger_optimize(self, reason: str = "event", *, notify: bool = False) -> None:
+        """Run BatteryOptimizer if cooldown has elapsed and data is available."""
+        if self._optimizer is None:
+            _LOGGER.debug("BatteryOptimizer: not ready yet — skipping (%s)", reason)
+            return
+
+        _LOGGER.info("Optimizer triggered: reason=%s", reason)
+
+        # Refresh runtime-configurable values from config entry (changed via number entities)
+        _cfg = self._entry.data
+        self._optimizer.charge_rate_kw     = float(_cfg.get("charge_rate_kw",     6.0))
+        self._optimizer.battery_min_soc    = float(_cfg.get("battery_min_soc",   10.0))
+        self._optimizer.battery_max_soc    = float(_cfg.get("battery_max_soc",  100.0))
+        self._optimizer.min_charge_saving  = float(_cfg.get("min_charge_saving",  0.10))
+
+        now = ha_dt.now()
+
+        if (
+            self._last_optimize_dt is not None
+            and (now - self._last_optimize_dt) < OPTIMIZE_MIN_INTERVAL
+        ):
+            _LOGGER.debug("BatteryOptimizer: skipping (%s) — cooldown active", reason)
+            return
+
+        if self.data is None:
+            _LOGGER.debug("BatteryOptimizer: no coordinator data yet — skipping (%s)", reason)
+            return
+
+        cfg = self._entry.data
+
+        # ── Raw prices from Energi Data Service / Nordpool sensor ──────────
+        raw_prices: list[dict[str, Any]] = []
+        price_sensor_id = cfg.get("price_sensor", "")
+        if price_sensor_id:
+            price_state = self.hass.states.get(price_sensor_id)
+            if price_state is not None:
+                raw_today: list = price_state.attributes.get("raw_today", []) or []
+                raw_tomorrow: list = price_state.attributes.get("raw_tomorrow", []) or []
+                raw_prices = raw_today + raw_tomorrow
+
+                # Fallback: some sensors expose prices under other keys
+                if not raw_prices:
+                    for attr_key in ("today", "prices"):
+                        prices_attr = price_state.attributes.get(attr_key)
+                        if isinstance(prices_attr, list) and prices_attr:
+                            raw_prices = prices_attr
+                            break
+
+        # Fallback to night-price history when sensor has no attribute list
+        if not raw_prices:
+            raw_prices = [{"hour": h, "price": p} for h, p in self._night_prices.items()]
+            if self.data.price > 0:
+                raw_prices.append({"hour": now.hour, "price": self.data.price})
+
+        # ── Forecast ───────────────────────────────────────────────────────
+        forecast_data = await ForecastAdapter.from_hass(
+            hass=self.hass,
+            forecast_type=cfg.get("forecast_type", "forecast_solar"),
+            forecast_sensor_entity=cfg.get("forecast_sensor"),
+        )
+
+        if forecast_data is None:
+            _LOGGER.warning("BatteryOptimizer: forecast data not available — using zeros")
+            forecast_today    = 0.0
+            forecast_tomorrow = 0.0
+            hourly_forecast: list = []
+        else:
+            forecast_today    = forecast_data.total_today_kwh
+            forecast_tomorrow = forecast_data.total_tomorrow_kwh
+            hourly_forecast   = forecast_data.hourly_forecast
+
+        # ── Sunrise / sunset from sun.sun ──────────────────────────────────
+        sunrise: datetime
+        sunset: datetime
+
+        sun_state = self.hass.states.get("sun.sun")
+        if sun_state is not None:
+            def _parse_sun_dt(attr_key: str) -> datetime | None:
+                raw = sun_state.attributes.get(attr_key)
+                if not raw:
+                    return None
+                try:
+                    dt = datetime.fromisoformat(str(raw))
+                    return dt.replace(tzinfo=None)  # make naive for comparison
+                except (ValueError, TypeError):
+                    return None
+
+            _sunrise = _parse_sun_dt("next_rising")
+            _sunset  = _parse_sun_dt("next_setting")
+
+            if _sunrise is None:
+                _LOGGER.warning(
+                    "sun.sun mangler 'next_rising' attribut — bruger fallback sunrise=06:00. "
+                    "Dette kan give forkert optimizer-adfærd om vinteren!"
+                )
+            if _sunset is None:
+                _LOGGER.warning(
+                    "sun.sun mangler 'next_setting' attribut — bruger fallback sunset=20:00. "
+                    "Dette kan give forkert optimizer-adfærd om vinteren!"
+                )
+
+            sunrise = _sunrise or now.replace(hour=6, minute=0, second=0, microsecond=0)
+            sunset  = _sunset  or now.replace(hour=20, minute=0, second=0, microsecond=0)
+        else:
+            _LOGGER.warning(
+                "sun.sun utilgængelig — bruger fallback sunrise=06:00 sunset=20:00. "
+                "Dette kan give forkert optimizer-adfærd om vinteren!"
+            )
+            sunrise = now.replace(hour=6, minute=0, second=0, microsecond=0)
+            sunset  = now.replace(hour=20, minute=0, second=0, microsecond=0)
+
+        # ── Current state ─────────────────────────────────────────────────
+        battery_soc = self.data.battery_soc
+        if battery_soc is None:
+            _LOGGER.debug("BatteryOptimizer: skipping — battery_soc not available yet")
+            return
+
+        current_soc = battery_soc
+        pv_power    = self.data.pv_power or 0.0
+        load_power  = self.data.load_power or 0.0
+        is_weekend  = now.weekday() >= 5
+
+        _LOGGER.debug(
+            "Optimizer inputs: now=%s sunrise=%s sunset=%s "
+            "raw_prices_count=%d is_night=%s soc=%.1f",
+            now.strftime("%H:%M"),
+            sunrise.strftime("%H:%M") if sunrise else "None",
+            sunset.strftime("%H:%M") if sunset else "None",
+            len(raw_prices),
+            now.time() < sunrise.time() or now.time() > sunset.time(),
+            current_soc,
+        )
+
+        # ── Call optimizer ────────────────────────────────────────────────
+        result = self._optimizer.optimize(
+            now=now,
+            pv_power=pv_power,
+            load_power=load_power,
+            current_soc=current_soc,
+            raw_prices=raw_prices,
+            forecast_today_kwh=forecast_today,
+            forecast_tomorrow_kwh=forecast_tomorrow,
+            sunrise_time=sunrise,
+            sunset_time=sunset,
+            is_weekend=is_weekend,
+            hourly_forecast=hourly_forecast,
+        )
+
+        self._last_optimize_dt = now
+        self._last_optimize_soc = current_soc
+
+        self.data.optimize_result = result
+
+        if self._inverter is not None and self._inverter.is_configured:
+            await self._inverter.apply(result)
+
+        if notify:
+            self.async_set_updated_data(self.data)
+
+        _LOGGER.info(
+            "BatteryOptimizer [%s] strategy=%s reason=%s saving=%.2f kr "
+            "morning_need=%.1f kWh night_charge=%.1f kWh target_soc=%s "
+            "solar_next2h=%.1f kWh solar_remaining=%.1f kWh",
+            reason,
+            result.strategy,
+            result.reason,
+            result.expected_saving_dkk,
+            result.morning_need_kwh,
+            result.night_charge_kwh,
+            f"{result.target_soc:.0f}%" if result.target_soc else "N/A",
+            self.data.solar_next_2h if self.data else 0.0,
+            self.data.solar_until_sunset if self.data else 0.0,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _read_state(self, entity_id: str) -> tuple[float | None, bool]:
+        """Return (float_value, is_available) for an entity."""
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unavailable", "unknown", ""):
+            return None, False
+        try:
+            return float(state.state), True
+        except (ValueError, TypeError):
+            return None, False
+
+    def _update_price_history(self, price: float) -> None:
+        self._price_history.append(price)
+        if len(self._price_history) > PRICE_HISTORY_MAX:
+            self._price_history.pop(0)
+
+    def _price_average(self) -> float | None:
+        if not self._price_history:
+            return None
+        return statistics.mean(self._price_history)
+
+    def _battery_strategy(
+        self, solar_surplus: float, price: float, avg_price: float | None
+    ) -> str:
+        if solar_surplus > 0:
+            return "CHARGE_SOLAR"
+        if avg_price is not None:
+            if price > avg_price * PRICE_SURPLUS_FACTOR:
+                return "USE_BATTERY"
+            if price < avg_price * PRICE_CHEAP_FACTOR:
+                return "CHARGE_GRID"
+        return "IDLE"
+
+    def _record_night_price(self, hour: int, price: float) -> None:
+        if hour not in NIGHT_HOURS:
+            return
+        existing = self._night_prices.get(hour)
+        if existing is None or price < existing:
+            self._night_prices[hour] = price
+
+    def _min_night_price(self) -> float | None:
+        if not self._night_prices:
+            return None
+        return min(self._night_prices.values())
+
+    def _price_level(self, price: float, avg_price: float | None) -> str:
+        if avg_price is None:
+            return "NORMAL"
+        if price > avg_price * PRICE_SURPLUS_FACTOR:
+            return "EXPENSIVE"
+        if price < avg_price * PRICE_CHEAP_FACTOR:
+            return "CHEAP"
+        return "NORMAL"
+
+    async def _update_tracker(
+        self,
+        now: datetime,
+        pv_power: float,
+        battery_power: float,
+        load_power: float,
+        battery_soc: float,
+        current_price: float,
+    ) -> None:
+        """Feed BatteryTracker with this tick's charge/discharge delta."""
+        if self._tracker is None:
+            return
+
+        # dt in hours since last tick
+        if self._prev_update_time is None:
+            dt_hours = 0.0
+        else:
+            dt_hours = (now - self._prev_update_time).total_seconds() / 3600
+
+        if dt_hours > 0:
+            surplus_w = pv_power - load_power
+
+            if battery_power < -_BATTERY_NOISE_W:
+                # Charging
+                charge_kwh = abs(battery_power) / 1000 * dt_hours
+                if surplus_w > _BATTERY_NOISE_W:
+                    self._tracker.on_solar_charge(charge_kwh)
+                else:
+                    self._tracker.on_grid_charge(charge_kwh, current_price)
+
+            elif battery_power > _BATTERY_NOISE_W:
+                # Discharging
+                discharge_kwh = battery_power / 1000 * dt_hours
+                self._tracker.on_discharge(discharge_kwh)
+
+            self._tracker.update_savings(
+                pv_w=pv_power,
+                load_w=load_power,
+                battery_w=battery_power,
+                price_dkk=current_price,
+                dt_seconds=dt_hours * 3600,
+            )
+
+        # SOC correction every 5 minutes
+        if self._last_soc_correction is None or (now - self._last_soc_correction) >= timedelta(minutes=5):
+            cfg = self._entry.data
+            self._tracker.on_soc_correction(
+                actual_soc=battery_soc,
+                capacity_kwh=float(cfg.get("battery_capacity_kwh", 0.0)),
+                min_soc=float(cfg.get("battery_min_soc", 0.0)),
+            )
+            self._last_soc_correction = now
+
+        # Battery sign convention heuristic — warn once if polarity looks inverted
+        if not self._battery_sign_warned and self.data is not None:
+            prev_soc = self.data.battery_soc
+            if (
+                prev_soc > 0
+                and battery_soc - prev_soc > 2.0        # SOC steg tydeligt
+                and battery_power > _BATTERY_NOISE_W    # men power er positiv (= aflader?)
+            ):
+                _LOGGER.warning(
+                    "battery_power ser ud til at have OMVENDT FORTEGN! "
+                    "SOC steg %.1f%% → %.1f%% mens battery_power=%.0fW (positiv). "
+                    "Forventet konvention: negativ = lader, positiv = aflader. "
+                    "Tjek din battery_power_sensor konfiguration.",
+                    prev_soc, battery_soc, battery_power,
+                )
+                self._battery_sign_warned = True
+
+        # Persist tracker every 15 minutes
+        if self._last_tracker_save is None or (now - self._last_tracker_save) >= timedelta(minutes=15):
+            await self._tracker.async_save(self.hass, self._entry)
+            self._last_tracker_save = now
+
+    # ------------------------------------------------------------------
+    # DataUpdateCoordinator entrypoint
+    # ------------------------------------------------------------------
+
+    async def _async_update_data(self) -> SolarFriendData:
+        cfg = self._entry.data
+        prev_data = self.data  # may be None on first call
+        data = SolarFriendData()
+
+        # Carry over optimizer + forecast results between polling cycles
+        if prev_data is not None:
+            data.optimize_result = prev_data.optimize_result
+            data.forecast_data   = prev_data.forecast_data
+
+        sensor_map: dict[str, str] = {
+            "pv_power":      cfg.get("pv_power_sensor", ""),
+            "grid_power":    cfg.get("grid_power_sensor", ""),
+            "battery_soc":   cfg.get("battery_soc_sensor", ""),
+            "battery_power": cfg.get("battery_power_sensor", ""),
+            "load_power":    cfg.get("load_power_sensor", ""),
+            "price":         cfg.get("price_sensor", ""),
+            "forecast":      cfg.get("forecast_sensor", ""),
+        }
+
+        readings: dict[str, float] = {}
+        unavailable: list[str] = []
+
+        for field_name, entity_id in sensor_map.items():
+            if not entity_id:
+                unavailable.append(field_name)
+                continue
+            value, available = self._read_state(entity_id)
+            if available and value is not None:
+                readings[field_name] = value
+            else:
+                unavailable.append(field_name)
+                _LOGGER.debug("Sensor unavailable: %s (%s)", field_name, entity_id)
+
+        if unavailable:
+            data.unavailable = unavailable
+
+        # Populate raw readings
+        data.pv_power      = readings.get("pv_power", 0.0)
+        data.grid_power    = readings.get("grid_power", 0.0)
+        data.battery_soc   = readings.get("battery_soc", 0.0)
+        data.battery_power = readings.get("battery_power", 0.0)
+        data.load_power    = readings.get("load_power", 0.0)
+        data.price         = readings.get("price", 0.0)
+        data.forecast      = readings.get("forecast", 0.0)
+
+        # Derived: surplus
+        data.solar_surplus = data.pv_power - data.load_power
+
+        # Rolling price history and night price tracking
+        now = ha_dt.now()
+        if "price" in readings:
+            self._update_price_history(data.price)
+            self._record_night_price(now.hour, data.price)
+
+        avg = self._price_average()
+        data.battery_strategy = self._battery_strategy(data.solar_surplus, data.price, avg)
+        data.price_level = self._price_level(data.price, avg)
+
+        # Battery economics
+        data.battery_cost_per_kwh = float(cfg.get("battery_cost_per_kwh", 0.0))
+        min_night = self._min_night_price()
+        if min_night is not None:
+            data.charge_threshold = round(min_night + data.battery_cost_per_kwh, 4)
+
+        # Update consumption profile every 15 minutes
+        if "load_power" in readings:
+            await self._maybe_update_profile(data.load_power)
+
+        data.profile_confidence = self._profile.confidence
+        data.profile_days_collected = self._profile.days_collected
+
+        # ── BatteryTracker update ─────────────────────────────────────────
+        have_tracker_inputs = (
+            "pv_power" in readings
+            and "battery_power" in readings
+            and "battery_soc" in readings
+        )
+        if have_tracker_inputs:
+            await self._update_tracker(
+                now=now,
+                pv_power=data.pv_power,
+                battery_power=data.battery_power,
+                load_power=data.load_power,
+                battery_soc=data.battery_soc,
+                current_price=data.price,
+            )
+
+        self._prev_battery_power = data.battery_power
+        self._prev_update_time = now
+
+        # Snapshot tracker into data
+        if self._tracker is not None:
+            data.battery_solar_kwh    = self._tracker.solar_kwh
+            data.battery_grid_kwh     = self._tracker.grid_kwh
+            data.battery_weighted_cost = self._tracker.weighted_cost
+            data.battery_solar_fraction = self._tracker.solar_fraction
+            data.today_solar_direct_kwh = self._tracker.today_solar_direct_kwh
+            data.today_solar_direct_saved_dkk = self._tracker.today_solar_direct_saved_dkk
+            data.today_optimizer_saved_dkk = self._tracker.today_optimizer_saved_dkk
+            data.total_solar_direct_saved_dkk = self._tracker.total_solar_direct_saved_dkk
+            data.total_optimizer_saved_dkk = self._tracker.total_optimizer_saved_dkk
+
+        # ── Consumption profile chart (24h curve) ────────────────────────────
+        is_weekend = now.weekday() >= 5
+        profile_key = "weekend" if is_weekend else "weekday"
+        hourly: list[float] = []
+        for hour in range(24):
+            slot = self._profile._profiles[profile_key][hour]
+            avg = round(slot["avg_watt"], 1) if slot["samples"] >= 3 else 0.0
+            hourly.append(avg)
+        data.consumption_profile_chart = hourly
+        data.consumption_profile_day_type = profile_key
+
+        # ── Forecast SOC curve (24h simulation) ──────────────────────────
+        current_soc = data.battery_soc or 35.0
+        capacity_kwh = float(cfg.get("battery_capacity_kwh", 10.0))
+        min_soc = float(cfg.get("battery_min_soc", 10.0))
+        max_soc = float(cfg.get("battery_max_soc", 90.0))
+        current_hour = now.hour
+
+        solcast_hourly: dict[int, float] = {}
+        if data.forecast_data and data.forecast_data.hourly_forecast:
+            for slot in data.forecast_data.hourly_forecast:
+                h = slot["period_start"].hour
+                solcast_hourly[h] = slot.get("pv_estimate_kwh", 0.0) * 1000  # → W
+
+        forecast_soc: list = []
+        soc = current_soc
+        for hour in range(24):
+            if hour < current_hour:
+                forecast_soc.append(None)
+                continue
+            pv_w = solcast_hourly.get(hour, 0.0)
+            pv_kwh = pv_w / 1000.0
+            load_w = data.consumption_profile_chart[hour] if data.consumption_profile_chart else 850.0
+            load_kwh = load_w / 1000.0
+            net_kwh = pv_kwh - load_kwh
+            delta_soc = (net_kwh / capacity_kwh) * 100.0
+            soc = max(min_soc, min(max_soc, soc + delta_soc))
+            forecast_soc.append(round(soc, 1))
+
+        data.forecast_soc_chart = forecast_soc
+
+        # ── Forecast data (refreshed every poll cycle) ───────────────────
+        fresh_forecast = await ForecastAdapter.from_hass(
+            hass=self.hass,
+            forecast_type=cfg.get("forecast_type", "forecast_solar"),
+            forecast_sensor_entity=cfg.get("forecast_sensor"),
+        )
+        if fresh_forecast is not None:
+            data.forecast_data = fresh_forecast
+
+            if fresh_forecast.hourly_forecast:
+                data.solar_next_2h = get_forecast_for_period(
+                    fresh_forecast.hourly_forecast, now, now + timedelta(hours=2)
+                )
+                sun_state = self.hass.states.get("sun.sun")
+                if sun_state is not None:
+                    raw_sunset = sun_state.attributes.get("next_setting")
+                    if raw_sunset:
+                        try:
+                            sunset_dt = datetime.fromisoformat(str(raw_sunset))
+                            data.solar_until_sunset = get_forecast_for_period(
+                                fresh_forecast.hourly_forecast, now, sunset_dt
+                            )
+                        except (ValueError, TypeError):
+                            pass
+
+        # ── Hourly optimizer fallback ─────────────────────────────────────
+        should_run_hourly = (
+            self._last_optimize_dt is None
+            or (now - self._last_optimize_dt) >= timedelta(hours=1)
+        )
+        if should_run_hourly:
+            # Temporarily expose the new data so _trigger_optimize can read it
+            self.data = data  # type: ignore[assignment]
+            await self._trigger_optimize("hourly-fallback", notify=False)
+            # Pull back whatever the optimizer wrote
+            data.optimize_result = self.data.optimize_result if self.data else data.optimize_result
+
+        _LOGGER.debug(
+            "Update: PV=%.0fW load=%.0fW battery=%.0fW SOC=%.1f%% "
+            "price=%.4f avg=%.4f strategy=%s level=%s "
+            "solar_kwh=%.3f grid_kwh=%.3f weighted_cost=%.3f",
+            data.pv_power, data.load_power, data.battery_power, data.battery_soc,
+            data.price, avg or 0, data.battery_strategy, data.price_level,
+            data.battery_solar_kwh, data.battery_grid_kwh, data.battery_weighted_cost,
+        )
+
+        return data
+
+    async def _maybe_update_profile(self, load_watt: float) -> None:
+        """Call async_update on the profile at most once every 15 minutes."""
+        now = ha_dt.now()
+        if (
+            self._last_profile_update is None
+            or (now - self._last_profile_update) >= timedelta(minutes=15)
+        ):
+            await self._profile.async_update(self.hass, load_watt)
+            self._last_profile_update = now

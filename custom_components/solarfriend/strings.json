@@ -1,0 +1,89 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SolarFriend opsætning",
+        "description": "Giv din SolarFriend integration et navn.",
+        "data": {
+          "name": "Navn"
+        }
+      },
+      "inverter_type": {
+        "title": "Vælg inverter-type",
+        "description": "Vælg hvilken inverter og integration der bruges til styring.",
+        "data": {
+          "inverter_type": "Inverter-type"
+        }
+      },
+      "power_sensors": {
+        "title": "Vælg effektsensorer",
+        "description": "Fandt {matched} af {total} Deye-sensorer automatisk. Kontrollér og juster om nødvendigt.",
+        "data": {
+          "pv_power_sensor": "PV produktion",
+          "grid_power_sensor": "Net effekt",
+          "battery_soc_sensor": "Batteri SOC",
+          "battery_power_sensor": "Batteri effekt",
+          "load_power_sensor": "Forbrug"
+        }
+      },
+      "battery_config": {
+        "title": "Batteri-konfiguration",
+        "description": "Angiv batteriets kapacitet og driftsgrænser.",
+        "data": {
+          "battery_capacity_kwh": "Batterikapacitet",
+          "battery_min_soc": "Minimum SOC",
+          "battery_max_soc": "Maksimum SOC"
+        }
+      },
+      "battery_economics": {
+        "title": "Batteri-økonomi",
+        "description": "Bruges til at beregne hvornår det er rentabelt at oplade fra nettet.",
+        "data": {
+          "battery_price_dkk": "Batteriets indkøbspris",
+          "battery_cycles": "Forventet antal cyklusser",
+          "min_charge_saving": "Minimum besparelse før nat-opladning"
+        }
+      },
+      "price_sensor": {
+        "title": "Vælg prissensor",
+        "description": "Vælg en sensor med aktuel elspotpris.",
+        "data": {
+          "price_sensor": "Elprissensor"
+        }
+      },
+      "forecast_type": {
+        "title": "Solprognose-integration",
+        "description": "Vælg hvilken integration der bruges til solcelleproduktions-forecast. Solcast anbefales for præcise time-for-time prognoser.",
+        "data": {
+          "forecast_type": "Forecast-type"
+        }
+      },
+      "forecast_sensor": {
+        "title": "Vælg solprognose-sensor",
+        "description": "Vælg en sensor med forventet solproduktion.",
+        "data": {
+          "forecast_sensor": "Prognose-sensor"
+        }
+      },
+      "deye_control": {
+        "title": "Deye styring",
+        "description": "Fandt {detected} Deye-styringsentiteter automatisk. Alle felter er valgfrie — spring over hvis ikke relevant.",
+        "data": {
+          "deye_grid_charge_switch": "Grid Charge switch",
+          "deye_time_of_use_switch": "Time of Use switch",
+          "deye_time_point_1_enable": "Time Point 1 charge enable",
+          "deye_time_point_1_start": "Time Point 1 starttidspunkt",
+          "deye_time_point_1_capacity": "Time Point 1 SOC-kapacitet",
+          "deye_grid_charge_current": "Maksimal netladningsstrøm",
+          "deye_energy_priority": "Energiprioritering"
+        }
+      }
+    },
+    "error": {
+      "min_soc_above_max": "Minimum SOC skal være lavere end maksimum SOC."
+    },
+    "abort": {
+      "single_instance_allowed": "SolarFriend er allerede opsat."
+    }
+  }
+}

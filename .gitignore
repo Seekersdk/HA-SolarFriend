@@ -1,0 +1,38 @@
+# ══════════════════════════════════════
+# Alt der IKKE er selve integrationen
+# ══════════════════════════════════════
+
+# Dev miljø — Home Assistant instans
+config/
+
+# Dev miljø — emulator
+mock/
+
+# Dev miljø — tests
+tests/
+
+# Docker
+docker-compose.yml
+mosquitto.conf
+.env
+
+# ══════════════════════════════════════
+# Python
+# ══════════════════════════════════════
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+
+# ══════════════════════════════════════
+# OS & editor
+# ══════════════════════════════════════
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+custom_components/solcast_solar/ 
+custom_components/energidataservice/ 
+custom_components/easee/ 
+custom_components/hacs/ 
