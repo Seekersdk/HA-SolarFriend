@@ -290,6 +290,35 @@ def _get_sensors_by_device_class(
     return dict(sorted(result.items(), key=lambda x: x[1]))
 
 
+def _get_spot_price_sensors(hass: HomeAssistant) -> dict[str, str]:
+    """Return sensors that look like a spot-price feed (e.g. Energi Data Service).
+
+    All three criteria must be met:
+    - device_class == "monetary"
+    - unit_of_measurement ends with "/kWh" (e.g. "DKK/kWh", "EUR/kWh")
+    - state attributes contain "raw_today" (distinguishes EDS from other monetary sensors)
+    """
+    registry = er.async_get(hass)
+    result: dict[str, str] = {}
+    for entity in registry.entities.values():
+        if entity.domain != "sensor":
+            continue
+        state = hass.states.get(entity.entity_id)
+        if state is None:
+            continue
+        dc = state.attributes.get("device_class") or entity.device_class or entity.original_device_class
+        if dc != "monetary":
+            continue
+        unit = state.attributes.get("unit_of_measurement", "")
+        if not unit.endswith("/kWh"):
+            continue
+        if "raw_today" not in state.attributes:
+            continue
+        name = state.attributes.get("friendly_name") or entity.entity_id
+        result[entity.entity_id] = f"{name} ({entity.entity_id})"
+    return result
+
+
 def _get_forecast_sensors(hass: HomeAssistant) -> dict[str, str]:
     """Return sensors with device_class energy or 'production' in their entity_id/name."""
     registry = er.async_get(hass)
@@ -565,8 +594,13 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         price_sensors = await self.hass.async_add_executor_job(
-            _get_sensors_by_device_class, self.hass, "monetary"
+            _get_spot_price_sensors, self.hass
         )
+        if not price_sensors:
+            # Fallback: all monetary sensors if no EDS-style sensor found
+            price_sensors = await self.hass.async_add_executor_job(
+                _get_sensors_by_device_class, self.hass, "monetary"
+            )
 
         if user_input is not None:
             self._data.update(user_input)
