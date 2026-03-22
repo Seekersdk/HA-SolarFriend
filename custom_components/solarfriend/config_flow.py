@@ -541,7 +541,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
                     NumberSelectorConfig(min=1000, max=200000, step=500, unit_of_measurement="kr", mode=NumberSelectorMode.BOX)
                 ),
                 vol.Required(CONF_BATTERY_CYCLES, default=4000): NumberSelector(
-                    NumberSelectorConfig(min=1000, max=10000, step=100, mode=NumberSelectorMode.BOX)
+                    NumberSelectorConfig(min=1000, max=20000, step=100, mode=NumberSelectorMode.BOX)
                 ),
                 vol.Required(CONF_MIN_CHARGE_SAVING, default=0.20): NumberSelector(
                     NumberSelectorConfig(min=0.05, max=1.00, step=0.05, unit_of_measurement="kr/kWh", mode=NumberSelectorMode.SLIDER)
