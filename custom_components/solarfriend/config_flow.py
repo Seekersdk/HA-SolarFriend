@@ -182,7 +182,14 @@ def _match_by_pattern(
 def _get_sensors_by_device_class(
     hass: HomeAssistant, *device_classes: str
 ) -> dict[str, str]:
-    """Return {entity_id: friendly_name} for sensors matching any of the given device classes."""
+    """Return {entity_id: friendly_name} for sensors matching any of the given device classes.
+
+    Falls back to unit_of_measurement when device_class is not set, so ESPHome
+    sensors without explicit device_class are still included.
+    """
+    _POWER_UNITS = {"W", "kW", "VA", "kVA"}
+    _BATTERY_UNITS = {"%"}
+
     registry = er.async_get(hass)
     result: dict[str, str] = {}
     for entity in registry.entities.values():
@@ -192,7 +199,16 @@ def _get_sensors_by_device_class(
         if state is None:
             continue
         dc = state.attributes.get("device_class") or entity.device_class or entity.original_device_class
-        if dc in device_classes:
+        unit = state.attributes.get("unit_of_measurement", "")
+
+        matched = dc in device_classes
+        if not matched:
+            if "power" in device_classes and unit in _POWER_UNITS:
+                matched = True
+            elif "battery" in device_classes and unit in _BATTERY_UNITS:
+                matched = True
+
+        if matched:
             name = state.attributes.get("friendly_name") or entity.entity_id
             result[entity.entity_id] = f"{name} ({entity.entity_id})"
     return dict(sorted(result.items(), key=lambda x: x[1]))
