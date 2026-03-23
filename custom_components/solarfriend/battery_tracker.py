@@ -5,7 +5,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
@@ -18,8 +17,14 @@ _DRIFT_THRESHOLD = 0.10  # log warning if tracker drifts >10% from actual SOC
 class BatteryTracker:
     """Tracks kWh in battery split by origin and computes weighted cost."""
 
-    def __init__(self, battery_cost_per_kwh: float) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry_id: str,
+        battery_cost_per_kwh: float,
+    ) -> None:
         self._battery_cost_per_kwh = battery_cost_per_kwh
+        self._store = Store(hass, STORAGE_VERSION, f"solarfriend_battery_tracker_{entry_id}")
         self.solar_kwh: float = 0.0
         self.grid_kwh: float = 0.0
         self.grid_avg_cost: float = 0.0  # weighted avg cost of grid kWh in battery
@@ -80,13 +85,9 @@ class BatteryTracker:
     # Persistence
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _store(hass: HomeAssistant, entry_id: str) -> Store:
-        return Store(hass, STORAGE_VERSION, f"solarfriend_battery_tracker_{entry_id}")
-
-    async def async_load(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+    async def async_load(self) -> None:
         """Load tracker state from HA storage."""
-        data: dict[str, Any] | None = await self._store(hass, config_entry.entry_id).async_load()
+        data: dict[str, Any] | None = await self._store.async_load()
         if not data:
             _LOGGER.debug("BatteryTracker: no stored data, starting fresh")
             return
@@ -106,9 +107,9 @@ class BatteryTracker:
             self.today_solar_direct_saved_dkk, self.today_optimizer_saved_dkk,
         )
 
-    async def async_save(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+    async def async_save(self) -> None:
         """Persist tracker state to HA storage."""
-        await self._store(hass, config_entry.entry_id).async_save(
+        await self._store.async_save(
             {
                 "solar_kwh": round(self.solar_kwh, 6),
                 "grid_kwh": round(self.grid_kwh, 6),
@@ -202,6 +203,24 @@ class BatteryTracker:
     # Savings tracking
     # ------------------------------------------------------------------
 
+    def _check_midnight_reset(self) -> None:
+        """Roll today's savings into lifetime totals when the date has changed."""
+        today = datetime.now().date().isoformat()
+        if self._last_reset_date and self._last_reset_date != today:
+            self.total_solar_direct_saved_dkk += self.today_solar_direct_saved_dkk
+            self.total_optimizer_saved_dkk += self.today_optimizer_saved_dkk
+            self.today_solar_direct_kwh = 0.0
+            self.today_solar_direct_saved_dkk = 0.0
+            self.today_optimizer_saved_dkk = 0.0
+            _LOGGER.info(
+                "BatteryTracker: ny dag %s — "
+                "total_sol=%.2f kr total_opt=%.2f kr",
+                today,
+                self.total_solar_direct_saved_dkk,
+                self.total_optimizer_saved_dkk,
+            )
+        self._last_reset_date = today
+
     def update_savings(
         self,
         pv_w: float,
@@ -218,21 +237,7 @@ class BatteryTracker:
         if dt_seconds <= 0 or price_dkk <= 0:
             return
 
-        # Daily reset — roll today into lifetime totals when the date changes
-        today = datetime.now().date().isoformat()
-        if self._last_reset_date and self._last_reset_date != today:
-            self.total_solar_direct_saved_dkk += self.today_solar_direct_saved_dkk
-            self.total_optimizer_saved_dkk += self.today_optimizer_saved_dkk
-            self.today_solar_direct_kwh = 0.0
-            self.today_solar_direct_saved_dkk = 0.0
-            self.today_optimizer_saved_dkk = 0.0
-            _LOGGER.debug(
-                "BatteryTracker: new day %s — rolled totals: solar_saved=%.4f optimizer_saved=%.4f",
-                today,
-                self.total_solar_direct_saved_dkk,
-                self.total_optimizer_saved_dkk,
-            )
-        self._last_reset_date = today
+        self._check_midnight_reset()
 
         # W × seconds / 3_600_000 = kWh
         pv_kwh = pv_w * dt_seconds / 3_600_000

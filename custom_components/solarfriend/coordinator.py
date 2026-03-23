@@ -27,6 +27,13 @@ from .ev_optimizer import EVContext, EVOptimizer
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _parse_dt(val) -> datetime:
+    """Parse period_start — handles both str and datetime objects."""
+    if isinstance(val, datetime):
+        return val
+    return datetime.fromisoformat(str(val))
+
 UPDATE_INTERVAL = timedelta(seconds=30)
 
 # Battery strategy thresholds
@@ -226,9 +233,32 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         """Load persisted state and register event listeners."""
         await self._profile.async_load(self.hass)
 
+        # ── Bootstrap consumption profile from recorder (runs once) ───────
+        bootstrap_done = self._entry.data.get("bootstrap_done", False)
+        load_entity = self._entry.data.get("load_power_sensor", "")
+
+        if not bootstrap_done and load_entity and self._profile.days_collected < 3:
+            try:
+                entries = await self._profile.bootstrap_from_history(
+                    self.hass, load_entity, days=14
+                )
+                if entries > 0:
+                    new_data = {**self._entry.data, "bootstrap_done": True}
+                    self.hass.config_entries.async_update_entry(
+                        self._entry, data=new_data
+                    )
+                    _LOGGER.info(
+                        "ConsumptionProfile bootstrap færdig: %d timer — "
+                        "live data overtager gradvist (n=1 per bucket)",
+                        entries,
+                    )
+            except Exception as exc:
+                _LOGGER.warning("Bootstrap fejl (ikke kritisk): %s", exc)
+                # Gem IKKE flag ved fejl — prøv igen næste genstart
+
         battery_cost = float(self._entry.data.get("battery_cost_per_kwh", 0.0))
-        self._tracker = BatteryTracker(battery_cost)
-        await self._tracker.async_load(self.hass, self._entry)
+        self._tracker = BatteryTracker(self.hass, self._entry.entry_id, battery_cost)
+        await self._tracker.async_load()
 
         self._optimizer = BatteryOptimizer(
             config_entry=self._entry,
@@ -488,6 +518,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         self.data.optimize_result = result
 
+        if result.strategy == "ANTI_EXPORT":
+            _LOGGER.warning(
+                "Negativ/nul spotpris %.4f kr/kWh — solar sell deaktiveret",
+                self.data.price,
+            )
+
         if self._inverter is not None and self._inverter.is_configured:
             await self._inverter.apply(result)
 
@@ -638,7 +674,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         # Persist tracker every 15 minutes
         if self._last_tracker_save is None or (now - self._last_tracker_save) >= timedelta(minutes=15):
-            await self._tracker.async_save(self.hass, self._entry)
+            await self._tracker.async_save()
             self._last_tracker_save = now
 
     # ------------------------------------------------------------------
@@ -713,7 +749,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         # Update consumption profile every 15 minutes
         if "load_power" in readings:
-            await self._maybe_update_profile(data.load_power)
+            await self._maybe_update_profile(
+                data.load_power,
+                ev_power_w=data.ev_charging_power,
+                battery_power_w=data.battery_power,
+            )
 
         data.profile_confidence = self._profile.confidence
         data.profile_days_collected = self._profile.days_collected
@@ -894,6 +934,59 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             driving_range_km = self._vehicle.get_driving_range()
             min_range_km = self.ev_min_range_km
 
+            _now = ha_dt.now()
+            _departure = self.ev_next_departure
+
+            # Solar kWh expected from now until departure — reads both Solcast sensors
+            # because forecast_today only covers until midnight.
+            # Normalize every timestamp to local time before comparing, matching
+            # the same approach used in _compute_ev_plan.
+            solar_to_departure = 0.0
+            _today_state    = self.hass.states.get("sensor.solcast_pv_forecast_forecast_today")
+            _tomorrow_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_tomorrow")
+            _LOGGER.debug(
+                "Solcast tomorrow state: %s, attributes keys: %s",
+                _tomorrow_state.state if _tomorrow_state else "None",
+                list(_tomorrow_state.attributes.keys())[:10] if _tomorrow_state else [],
+            )
+            if _tomorrow_state:
+                _t_hourly = _tomorrow_state.attributes.get("detailedHourly", [])
+                _LOGGER.debug("Tomorrow detailedHourly entries: %d", len(_t_hourly))
+                if _t_hourly:
+                    _LOGGER.debug("Tomorrow first entry: %s", _t_hourly[0])
+            for _state in (_today_state, _tomorrow_state):
+                if not _state:
+                    continue
+                for _entry in _state.attributes.get("detailedHourly", []):
+                    try:
+                        _dt_raw = _parse_dt(_entry["period_start"])
+                        _dt_local = ha_dt.as_local(_dt_raw) if _dt_raw.tzinfo else ha_dt.as_local(
+                            _dt_raw.replace(tzinfo=ha_dt.UTC)
+                        )
+                        if _now <= _dt_local < _departure:
+                            solar_to_departure += float(_entry.get("pv_estimate", 0))
+                    except (KeyError, ValueError, TypeError):
+                        pass
+            _LOGGER.debug(
+                "EV solar forecast til afgang %s: %.2f kWh "
+                "(today entries: %d, tomorrow entries: %d)",
+                _departure.strftime("%H:%M"), solar_to_departure,
+                len(_today_state.attributes.get("detailedHourly", [])) if _today_state else 0,
+                len(_tomorrow_state.attributes.get("detailedHourly", [])) if _tomorrow_state else 0,
+            )
+
+            # Expected SOC at this moment from previous plan — used for behind-schedule check
+            _now_hour = _now.replace(minute=0, second=0, microsecond=0)
+            _expected_soc = self.data.ev_vehicle_soc or 0.0
+            for _slot in self.data.ev_plan:
+                try:
+                    _slot_dt = datetime.fromisoformat(_slot["hour"])
+                    if abs((_slot_dt - _now_hour).total_seconds()) < 3600:
+                        _expected_soc = _slot["soc"]
+                        break
+                except (KeyError, ValueError, TypeError):
+                    pass
+
             ctx = EVContext(
                 pv_power_w=self.data.pv_power,
                 load_power_w=self.data.load_power,
@@ -910,7 +1003,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 vehicle_soc=vehicle_soc,
                 vehicle_capacity_kwh=self.vehicle_battery_kwh,
                 vehicle_target_soc=vehicle_target_soc,
-                departure=self.ev_next_departure,
+                departure=_departure,
                 current_price=self.data.price,
                 raw_prices=self._get_raw_prices(),
                 max_charge_kw=float(
@@ -919,7 +1012,10 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 driving_range_km=driving_range_km,
                 min_range_km=min_range_km,
                 vehicle_efficiency_km_per_kwh=vehicle_efficiency,
-                now=ha_dt.now(),
+                now=_now,
+                solar_forecast_to_departure_kwh=solar_to_departure,
+                ev_plan_expected_soc_now=_expected_soc,
+                current_price_dkk=self.data.price,
             )
 
             ev_result = self._ev_optimizer.optimize(ctx, mode=self.ev_charge_mode)
@@ -1036,37 +1132,109 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         slot_dts = [slot_base + timedelta(hours=i) for i in range(hours_in_window)]
 
         # ── Price lookup mapped to slot datetime ─────────────────────────
-        # Build {hour_int: price} then map to slot_dts
-        price_by_hour: dict[int, float] = {}
-        for p in self._get_raw_prices():
-            h: int | None = None
-            if "hour" in p:
+        # Keys are UTC hour-truncated datetimes to avoid timezone object
+        # mismatches (e.g. ZoneInfo vs fixed-offset) causing dict misses.
+        # Handles both EDS ("hour": ISO string) and Nordpool ("start": ISO/dt).
+        # Fallback dict (hour int → price) for sensors that only provide an
+        # integer hour with no date (cannot disambiguate multi-day windows).
+        raw_prices = self._get_raw_prices()
+        price_by_utc: dict[datetime, float] = {}
+        price_by_hour_fallback: dict[int, float] = {}
+        for p in raw_prices:
+            raw_price = p.get("price") if p.get("price") is not None else p.get("value")
+            if raw_price is None:
+                continue
+            # Try "start" (Nordpool) then "hour" (EDS ISO string) as datetime source
+            raw_dt = p.get("start") or p.get("hour")
+            if raw_dt is not None:
                 try:
-                    h = int(p["hour"])
-                except (TypeError, ValueError):
-                    pass
-            elif "start" in p:
-                try:
-                    dt = datetime.fromisoformat(str(p["start"]))
-                    if dt.tzinfo is not None:
-                        dt = ha_dt.as_local(dt)
-                    h = dt.hour
+                    dt = raw_dt if isinstance(raw_dt, datetime) else datetime.fromisoformat(str(raw_dt))
+                    dt_utc = (
+                        ha_dt.as_utc(dt) if dt.tzinfo is not None
+                        else ha_dt.as_utc(ha_dt.as_local(dt))
+                    )
+                    price_by_utc[dt_utc.replace(minute=0, second=0, microsecond=0)] = float(raw_price)
+                    continue
                 except (ValueError, TypeError):
                     pass
-            if h is not None and "price" in p:
-                price_by_hour[h] = float(p["price"])
+            # Last resort: integer hour key (no date, 24-hour window only)
+            h = p.get("hour")
+            if h is not None:
+                try:
+                    price_by_hour_fallback[int(h)] = float(raw_price)
+                except (TypeError, ValueError):
+                    pass
+
+        _LOGGER.debug(
+            "_compute_ev_plan: price_by_utc=%d entries raw_prices=%d "
+            "departure=%s first_5_utc=%s",
+            len(price_by_utc), len(raw_prices), departure,
+            list(price_by_utc.keys())[:5],
+        )
+
+        def _price_for(slot_dt: datetime, default: float = 0.0) -> float:
+            slot_utc = (
+                ha_dt.as_utc(slot_dt) if slot_dt.tzinfo is not None
+                else ha_dt.as_utc(ha_dt.as_local(slot_dt))
+            ).replace(minute=0, second=0, microsecond=0)
+            if slot_utc in price_by_utc:
+                return price_by_utc[slot_utc]
+            fallback = price_by_hour_fallback.get(slot_dt.hour, default)
+            _LOGGER.debug(
+                "_price_for: %s (UTC %s) → no match in price_by_utc, fallback=%.4f",
+                slot_dt.isoformat(), slot_utc.isoformat(), fallback,
+            )
+            return fallback
+
+        # ── Solar forecast to departure (for hybrid grid-hour reduction) ──
+        # Read directly from both Solcast sensors (same logic as _update_ev) so
+        # the plan and optimizer always use the same solar estimate.
+        solar_to_departure_kwh = 0.0
+        _plan_today_state    = self.hass.states.get("sensor.solcast_pv_forecast_forecast_today")
+        _plan_tomorrow_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_tomorrow")
+        for _plan_state in (_plan_today_state, _plan_tomorrow_state):
+            if not _plan_state:
+                continue
+            for _plan_entry in _plan_state.attributes.get("detailedHourly", []):
+                try:
+                    _pdt_raw = _parse_dt(_plan_entry["period_start"])
+                    _pdt_local = ha_dt.as_local(_pdt_raw) if _pdt_raw.tzinfo else ha_dt.as_local(
+                        _pdt_raw.replace(tzinfo=ha_dt.UTC)
+                    )
+                    if now <= _pdt_local < departure:
+                        solar_to_departure_kwh += float(_plan_entry.get("pv_estimate", 0))
+                except (KeyError, ValueError, TypeError):
+                    pass
 
         # ── Determine cheap slots for hybrid / grid_schedule ─────────────
         cheap_slot_set: set[int] = set()  # indices into slot_dts
         if mode in ("hybrid", "grid_schedule"):
-            needed_kwh = max(0.0, (target_soc - current_soc) / 100.0 * capacity_kwh)
-            needed_hours = math.ceil(needed_kwh / max_charge_kw) if max_charge_kw > 0 else 0
+            total_needed_kwh = max(0.0, (target_soc - current_soc) / 100.0 * capacity_kwh)
+            # hybrid: solar covers part of the need — only schedule grid for the remainder
+            if mode == "hybrid":
+                grid_needed_kwh = max(0.0, total_needed_kwh - solar_to_departure_kwh)
+            else:
+                grid_needed_kwh = total_needed_kwh
+            needed_hours = math.ceil(grid_needed_kwh / max_charge_kw) if grid_needed_kwh > 0 and max_charge_kw > 0 else 0
             # Sort slots by price, pick cheapest N
             priced = sorted(
                 range(hours_in_window),
-                key=lambda i: price_by_hour.get(slot_dts[i].hour, 9999.0),
+                key=lambda i: _price_for(slot_dts[i], default=9999.0),
             )
             cheap_slot_set = set(priced[:needed_hours])
+            _LOGGER.debug(
+                "EV plan hybrid DEBUG: "
+                "current_soc=%.1f%% target_soc=%.1f%% capacity=%.1f kWh "
+                "total_needed=%.2f kWh solar_forecast=%.2f kWh "
+                "grid_needed=%.2f kWh grid_hours=%d max_charge_kw=%.1f",
+                current_soc, target_soc, capacity_kwh,
+                total_needed_kwh, solar_to_departure_kwh,
+                grid_needed_kwh, needed_hours, max_charge_kw,
+            )
+            _LOGGER.debug(
+                "EV plan hybrid cheap_hours: %s",
+                sorted(slot_dts[i].isoformat() for i in cheap_slot_set),
+            )
 
         # ── Build plan hour by hour ───────────────────────────────────────
         plan: list[dict] = []
@@ -1102,13 +1270,20 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             soc_gain = (charge_w / 1000.0) / capacity_kwh * 100.0
             soc = min(target_soc, soc + soc_gain)
 
-            plan.append({
+            slot = {
                 "hour": hour_dt.isoformat(),
                 "soc": round(soc, 1),
                 "solar_w": round(solar_contribution),
                 "grid_w": round(grid_contribution),
                 "total_w": round(charge_w),
-            })
+                "price_dkk": round(_price_for(hour_dt), 4),
+            }
+            plan.append(slot)
+            _LOGGER.debug(
+                "EV plan slot %s: soc=%.1f%% solar=%.0fW grid=%.0fW total=%.0fW price=%.3f",
+                slot["hour"], slot["soc"], slot["solar_w"],
+                slot["grid_w"], slot["total_w"], slot["price_dkk"],
+            )
 
         return plan
 
@@ -1129,12 +1304,21 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             dep += timedelta(days=1)
         return dep
 
-    async def _maybe_update_profile(self, load_watt: float) -> None:
+    async def _maybe_update_profile(
+        self,
+        load_watt: float,
+        ev_power_w: float = 0.0,
+        battery_power_w: float = 0.0,
+    ) -> None:
         """Call async_update on the profile at most once every 15 minutes."""
         now = ha_dt.now()
         if (
             self._last_profile_update is None
             or (now - self._last_profile_update) >= timedelta(minutes=15)
         ):
-            await self._profile.async_update(self.hass, load_watt)
+            await self._profile.async_update(
+                self.hass, load_watt,
+                ev_power_w=ev_power_w,
+                battery_power_w=battery_power_w,
+            )
             self._last_profile_update = now

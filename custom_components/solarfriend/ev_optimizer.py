@@ -44,6 +44,9 @@ class EVContext:
     min_range_km: float = 0.0               # 0 = feature disabled
     vehicle_efficiency_km_per_kwh: float = 6.0
     now: datetime = field(default_factory=datetime.now)
+    solar_forecast_to_departure_kwh: float = 0.0  # Expected solar yield from now → departure
+    ev_plan_expected_soc_now: float = 0.0   # SOC expected at this moment per previous plan
+    current_price_dkk: float = 0.0          # Spot price in DKK/kWh (same as current_price)
 
 
 @dataclass
@@ -269,6 +272,89 @@ class EVOptimizer:
 
     def _hybrid(self, ctx: EVContext) -> EVOptimizeResult:
         """Solar-first; supplement with cheapest grid hours to reach departure target."""
+        now = ctx.now
+
+        # ── Pre-checks: deadline and behind-schedule (run before normal logic) ──
+
+        # 1. Status
+        hours_to_departure = max(0.1, (ctx.departure - now).total_seconds() / 3600)
+        missing_kwh = max(0.0, (ctx.vehicle_target_soc - ctx.vehicle_soc) / 100 * ctx.vehicle_capacity_kwh)
+        max_possible_kwh = hours_to_departure * ctx.max_charge_kw
+
+        # 2. Deadline check — if we can barely make it, charge at full speed
+        if (
+            ctx.charger_status != "disconnected"
+            and ctx.vehicle_soc < ctx.vehicle_target_soc
+            and missing_kwh > 0
+            and missing_kwh >= max_possible_kwh * 0.9
+        ):
+            _, phases, amps, actual_w = self._calc_phase_and_amps(
+                ctx.max_charge_kw * 1000, ctx.max_charge_kw * 1000
+            )
+            if actual_w > 0:
+                _LOGGER.info(
+                    "EV hybrid deadline: %.1f kWh needed / %.1f t → lader max",
+                    missing_kwh, hours_to_departure,
+                )
+                return EVOptimizeResult(
+                    should_charge=True, target_w=actual_w, phases=phases, target_amps=amps,
+                    reason=f"⏰ Deadline — {missing_kwh:.1f} kWh / {hours_to_departure:.1f}t",
+                    vehicle_soc=ctx.vehicle_soc, vehicle_target_soc=ctx.vehicle_target_soc,
+                    surplus_w=_surplus_w(ctx), charger_status=ctx.charger_status,
+                )
+
+        # 3. Behind-schedule check — compare actual SOC vs plan
+        deficit_kwh = max(0.0, (ctx.ev_plan_expected_soc_now - ctx.vehicle_soc) / 100 * ctx.vehicle_capacity_kwh)
+
+        if (
+            deficit_kwh > 0.5
+            and ctx.charger_status != "disconnected"
+            and ctx.vehicle_soc < ctx.vehicle_target_soc
+        ):
+            sol_remaining = ctx.solar_forecast_to_departure_kwh
+
+            # Can solar recover the deficit?
+            if sol_remaining >= deficit_kwh * 1.2:
+                result = self._solar_only(ctx)
+                result.reason = f"☀️ Bagud {deficit_kwh:.1f} kWh — sol indhenter ({sol_remaining:.1f} kWh)"
+                return result
+
+            # Are there cheaper prices ahead?
+            parsed = _parse_prices(ctx.raw_prices)
+            now_naive = _strip_tz(now)
+            dep_naive = _strip_tz(ctx.departure)
+            future_prices = [price for dt, price in parsed if now_naive < dt < dep_naive]
+
+            if future_prices:
+                cheapest_future = min(future_prices)
+                if cheapest_future < ctx.current_price_dkk * 0.7:
+                    result = self._solar_only(ctx)
+                    result.reason = (
+                        f"⏳ Bagud {deficit_kwh:.1f} kWh — "
+                        f"venter på billigere time "
+                        f"({cheapest_future:.2f} kr vs {ctx.current_price_dkk:.2f} kr nu)"
+                    )
+                    return result
+
+            # Grid supplement now — spread deficit over remaining time
+            grid_boost_w = min(
+                deficit_kwh / max(0.5, hours_to_departure) * 1000,
+                ctx.max_charge_kw * 1000,
+            )
+            _, phases, amps, actual_w = self._calc_phase_and_amps(grid_boost_w, ctx.max_charge_kw * 1000)
+            if actual_w > 0:
+                _LOGGER.info(
+                    "EV hybrid behind: %.1f kWh deficit → grid supplement %.0fW",
+                    deficit_kwh, actual_w,
+                )
+                return EVOptimizeResult(
+                    should_charge=True, target_w=actual_w, phases=phases, target_amps=amps,
+                    reason=f"⚡ Bagud {deficit_kwh:.1f} kWh — supplerer med {grid_boost_w:.0f}W grid",
+                    vehicle_soc=ctx.vehicle_soc, vehicle_target_soc=ctx.vehicle_target_soc,
+                    surplus_w=_surplus_w(ctx), charger_status=ctx.charger_status,
+                )
+
+        # ── Normal hybrid logic ────────────────────────────────────────────────
         # 1. Try solar first
         solar_result = self._solar_only(ctx)
         if solar_result.should_charge:
@@ -300,7 +386,22 @@ class EVOptimizer:
             )
             return base
 
-        n_hours = _needed_charge_hours(ctx)
+        # Subtract expected solar yield from grid-hours needed
+        total_kwh = _needed_kwh(ctx)
+        sol_kwh = ctx.solar_forecast_to_departure_kwh
+        grid_needed_kwh = max(0.0, total_kwh - sol_kwh)
+
+        _LOGGER.debug(
+            "Hybrid: total=%.2f kWh sol=%.2f kWh grid=%.2f kWh → %d grid-timer",
+            total_kwh, sol_kwh, grid_needed_kwh,
+            math.ceil(grid_needed_kwh / ctx.max_charge_kw) if ctx.max_charge_kw > 0 else 0,
+        )
+
+        if grid_needed_kwh <= 0:
+            # Solar forecast covers everything — no grid charging needed
+            return self._solar_only(ctx)
+
+        n_hours = max(1, math.ceil(grid_needed_kwh / ctx.max_charge_kw)) if ctx.max_charge_kw > 0 else 1
         cheapest = _find_cheapest_charge_hours(
             ctx.raw_prices, ctx.now, ctx.departure, n_hours
         )

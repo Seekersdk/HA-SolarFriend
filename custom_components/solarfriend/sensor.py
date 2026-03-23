@@ -276,7 +276,9 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         state_class=None,
         icon="mdi:brain",
         value_fn=lambda d, _: (
-            d.optimize_result.strategy if d.optimize_result else "IDLE"
+            "Anti-eksport (negativ pris)"
+            if d.optimize_result and d.optimize_result.strategy == "ANTI_EXPORT"
+            else (d.optimize_result.strategy if d.optimize_result else "IDLE")
         ),
         extra_attrs_fn=lambda d, _: (
             {

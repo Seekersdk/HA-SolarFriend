@@ -67,6 +67,7 @@ CONF_DEYE_TIME_POINT_1_START   = "deye_time_point_1_start"
 CONF_DEYE_TIME_POINT_1_CAPACITY = "deye_time_point_1_capacity"
 CONF_DEYE_GRID_CHARGE_CURRENT  = "deye_grid_charge_current"
 CONF_DEYE_ENERGY_PRIORITY      = "deye_energy_priority"
+CONF_SOLAR_SELL_ENTITY         = "solar_sell_entity"
 
 DEFAULT_NAME = "SolarFriend"
 FORECAST_DEFAULT = "sensor.energy_production_today"
@@ -878,6 +879,13 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             )
         guesses = _guess_deye_control_entities(self.hass)
 
+        # Auto-detect solar_sell switch
+        solar_sell_default = ""
+        for state in self.hass.states.async_all("switch"):
+            if "solar_sell" in state.entity_id:
+                solar_sell_default = state.entity_id
+                break
+
         def _opt_switch(conf_key: str) -> vol.Optional:
             guess = guesses.get(conf_key)
             return vol.Optional(conf_key, default=guess) if guess in switch_entities else vol.Optional(conf_key)
@@ -896,6 +904,21 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             guess = guesses.get(conf_key)
             return vol.Optional(conf_key, default=guess) if guess in priority_entities else vol.Optional(conf_key)
 
+        # All switches for the optional solar_sell field
+        all_switch_entities = (
+            switch_entities
+            if switch_entities
+            else await self.hass.async_add_executor_job(
+                _get_entities_by_domain, self.hass, "switch"
+            )
+        )
+
+        _solar_sell_field = (
+            vol.Optional(CONF_SOLAR_SELL_ENTITY, default=solar_sell_default)
+            if solar_sell_default in all_switch_entities
+            else vol.Optional(CONF_SOLAR_SELL_ENTITY)
+        )
+
         schema = vol.Schema(
             {
                 _opt_switch(CONF_DEYE_GRID_CHARGE_SWITCH):    vol.In(switch_entities),
@@ -905,6 +928,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
                 _opt_number(CONF_DEYE_TIME_POINT_1_CAPACITY): vol.In(number_entities),
                 _opt_number(CONF_DEYE_GRID_CHARGE_CURRENT):   vol.In(number_entities),
                 _opt_select(CONF_DEYE_ENERGY_PRIORITY):       vol.In(priority_entities),
+                _solar_sell_field:                             vol.In(all_switch_entities),
             }
         )
 

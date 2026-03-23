@@ -28,6 +28,7 @@ class DeyeController(InverterController):
         self._tp1_capacity    = data.get("deye_time_point_1_capacity")
         self._charge_current  = data.get("deye_grid_charge_current")
         self._energy_priority = data.get("deye_energy_priority")
+        self._solar_sell      = data.get("solar_sell_entity", "")
 
         self._last_strategy: str | None = None
 
@@ -46,17 +47,26 @@ class DeyeController(InverterController):
             self._last_strategy, result.strategy, result.reason,
         )
 
-        if result.strategy == "CHARGE_NIGHT":
+        if result.strategy == "ANTI_EXPORT":
+            await self._set_solar_sell(False)
+            await self._apply_idle()
+        elif result.strategy == "CHARGE_NIGHT":
+            await self._set_solar_sell(True)
             await self._apply_charge_night(result)
         elif result.strategy == "USE_BATTERY":
+            await self._set_solar_sell(True)
             await self._apply_use_battery()
         elif result.strategy == "SELL_BATTERY":
+            await self._set_solar_sell(True)
             await self._apply_sell_battery()
         elif result.strategy == "SAVE_SOLAR":
+            await self._set_solar_sell(True)
             await self._apply_save_solar()
         elif result.strategy == "CHARGE_GRID":
+            await self._set_solar_sell(True)
             await self._apply_charge_grid(result)
         elif result.strategy == "IDLE":
+            await self._set_solar_sell(True)
             await self._apply_idle()
 
         self._last_strategy = result.strategy
@@ -108,8 +118,8 @@ class DeyeController(InverterController):
         )
 
     async def _apply_save_solar(self) -> None:
-        """Store solar energy in battery rather than exporting."""
-        await self._set_select(self._energy_priority, "Battery first")
+        """Let solar cover house load first; surplus charges battery automatically."""
+        await self._set_select(self._energy_priority, "Load first")
         await self._set_switch(self._grid_charge, False)
         await self._set_switch(self._time_of_use, False)
 
@@ -124,6 +134,17 @@ class DeyeController(InverterController):
         await self._set_switch(self._grid_charge, False)
         await self._set_switch(self._time_of_use, False)
         await self._set_select(self._energy_priority, "Load first")
+
+    async def _set_solar_sell(self, enabled: bool) -> None:
+        """Enable or disable solar sell to grid. No-op if entity not configured."""
+        if not self._solar_sell:
+            return
+        await self._set_switch(self._solar_sell, enabled)
+        _LOGGER.info(
+            "DeyeController: solar_sell → %s (%s)",
+            "ON" if enabled else "OFF",
+            self._solar_sell,
+        )
 
     # ------------------------------------------------------------------
     # HA service helpers

@@ -33,6 +33,7 @@ class OptimizeResult:
     weighted_battery_cost: float           # Aktuel vægtet batteriomkostning (kr/kWh)
     solar_fraction: float                  # Andel sol i batteriet (0.0–1.0)
     best_discharge_hours: List[str]        # "HH:MM" — timer med højest discharge-value
+    solar_sell: bool = True               # False → slå solar-salg til net fra (negativ pris)
 
     @classmethod
     def idle(
@@ -56,6 +57,7 @@ class OptimizeResult:
             weighted_battery_cost=weighted_cost,
             solar_fraction=solar_fraction,
             best_discharge_hours=[],
+            solar_sell=True,
         )
 
 
@@ -816,6 +818,34 @@ class BatteryOptimizer:
         )
         weighted_cost = self._tracker.weighted_cost
         solar_fraction = self._tracker.solar_fraction
+
+        # ── Anti-eksport: negativ/nul spotpris ────────────────────────────
+        current_price: float = 0.0
+        for slot in raw_prices:
+            if isinstance(slot, dict) and slot.get("hour") == now.hour:
+                try:
+                    current_price = float(slot.get("price", 0.0))
+                except (TypeError, ValueError):
+                    pass
+                break
+
+        if current_price <= 0 and raw_prices:
+            return OptimizeResult(
+                strategy="ANTI_EXPORT",
+                reason=f"Negativ/nul pris ({current_price:.4f} kr/kWh) — solar sell OFF",
+                target_soc=None,
+                charge_now=False,
+                cheapest_charge_hour=None,
+                night_charge_kwh=0.0,
+                morning_need_kwh=0.0,
+                day_deficit_kwh=0.0,
+                peak_need_kwh=0.0,
+                expected_saving_dkk=0.0,
+                weighted_battery_cost=weighted_cost,
+                solar_fraction=solar_fraction,
+                best_discharge_hours=[],
+                solar_sell=False,
+            )
 
         is_night = (
             now.time() < sunrise_time.time() or now.time() > sunset_time.time()
