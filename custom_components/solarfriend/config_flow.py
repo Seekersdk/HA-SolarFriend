@@ -12,6 +12,8 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -41,6 +43,21 @@ CONF_MIN_CHARGE_SAVING = "min_charge_saving"
 CONF_BATTERY_COST_PER_KWH = "battery_cost_per_kwh"
 CONF_FORECAST_TYPE = "forecast_type"
 CONF_INVERTER_TYPE = "inverter_type"
+
+# EV charging keys
+CONF_EV_CHARGING_ENABLED        = "ev_charging_enabled"
+CONF_EV_CHARGER_TYPE            = "ev_charger_type"
+CONF_EV_CHARGER_STATUS_ENTITY   = "ev_charger_status_entity"
+CONF_EV_CHARGER_POWER_ENTITY    = "ev_charger_power_entity"
+CONF_EV_CHARGER_ID              = "ev_charger_id"
+CONF_EV_CHARGER_PAUSE_SWITCH    = "ev_charger_pause_switch"
+CONF_EV_MAX_CHARGE_KW           = "ev_max_charge_kw"
+CONF_VEHICLE_TYPE               = "vehicle_type"
+CONF_VEHICLE_SOC_ENTITY         = "vehicle_soc_entity"
+CONF_VEHICLE_PLUGGED_IN_ENTITY  = "vehicle_plugged_in_entity"
+CONF_VEHICLE_TARGET_SOC         = "vehicle_target_soc"
+CONF_VEHICLE_TARGET_SOC_ENTITY  = "vehicle_target_soc_entity"
+CONF_VEHICLE_RANGE_ENTITY       = "vehicle_range_entity"
 
 # Deye control entity keys
 CONF_DEYE_GRID_CHARGE_SWITCH   = "deye_grid_charge_switch"
@@ -389,6 +406,127 @@ def _guess_deye_control_entities(hass: HomeAssistant) -> dict[str, str | None]:
     return result
 
 
+_EASEE_CHARGER_STATES = {
+    "disconnected", "awaiting_start", "charging",
+    "ready_to_charge", "completed", "error",
+}
+
+
+def _detect_easee_entities(
+    hass: HomeAssistant,
+) -> tuple[str | None, str | None, str | None]:
+    """Return (status_entity, power_entity, charger_id) for an Easee charger."""
+    registry = er.async_get(hass)
+
+    easee_sensors = [
+        e for e in registry.entities.values()
+        if e.domain == "sensor" and "easee" in e.entity_id
+    ]
+
+    status_entity: str | None = None
+    power_entity: str | None = None
+    charger_id: str | None = None
+
+    for entry in easee_sensors:
+        state = hass.states.get(entry.entity_id)
+        if state is None:
+            continue
+        if status_entity is None and state.state in _EASEE_CHARGER_STATES:
+            status_entity = entry.entity_id
+            # Try to extract charger_id from pattern sensor.easee_<ID>_status
+            eid = entry.entity_id
+            if eid.startswith("sensor.easee_") and eid.endswith("_status"):
+                charger_id = eid[len("sensor.easee_"):-len("_status")]
+            # Fallback: check state attributes
+            if not charger_id:
+                charger_id = (
+                    state.attributes.get("charger_id")
+                    or state.attributes.get("id")
+                )
+        if power_entity is None:
+            unit = state.attributes.get("unit_of_measurement", "")
+            if unit == "W":
+                power_entity = entry.entity_id
+
+    return status_entity, power_entity, charger_id
+
+
+def _detect_kia_entities(
+    hass: HomeAssistant,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Return (soc_entity, plugged_in_entity, target_soc_entity, range_entity) for a Kia/Hyundai vehicle."""
+    registry = er.async_get(hass)
+
+    # --- SOC sensor ---
+    soc_candidates: list[tuple[int, str]] = []
+    for entry in registry.entities.values():
+        if entry.domain != "sensor":
+            continue
+        eid = entry.entity_id.lower()
+        if any(skip in eid for skip in ("12v", "twelve")):
+            continue
+        if "battery_level" not in eid and "ev_battery_level" not in eid:
+            continue
+
+        state = hass.states.get(entry.entity_id)
+        if state is None:
+            continue
+        dc = (
+            state.attributes.get("device_class")
+            or entry.device_class
+            or entry.original_device_class
+            or ""
+        )
+
+        score = 0
+        if "ev_battery_level" in eid:
+            score += 3
+        if "kia" in eid or "hyundai" in eid:
+            score += 2
+        if dc == "battery":
+            score += 1
+        soc_candidates.append((score, entry.entity_id))
+
+    soc_entity = max(soc_candidates, default=(0, None))[1] if soc_candidates else None
+
+    # --- Plugged-in binary sensor ---
+    plugged_in_entity: str | None = None
+    for entry in registry.entities.values():
+        if entry.domain != "binary_sensor":
+            continue
+        eid = entry.entity_id.lower()
+        if any(kw in eid for kw in ("plugged_in", "ev_battery_charge", "charging")):
+            state = hass.states.get(entry.entity_id)
+            if state and state.state in ("on", "off"):
+                plugged_in_entity = entry.entity_id
+                break
+
+    # --- Target SOC entity (sensor or number) ---
+    target_soc_entity: str | None = None
+    for entry in registry.entities.values():
+        if entry.domain not in ("sensor", "number"):
+            continue
+        eid = entry.entity_id.lower()
+        if not any(kw in eid for kw in ("charge_limit", "target_soc", "charging_limit")):
+            continue
+        if not any(brand in eid for brand in ("kia", "hyundai")):
+            continue
+        target_soc_entity = entry.entity_id
+        break
+
+    # --- Driving range sensor ---
+    range_entity: str | None = None
+    for entry in registry.entities.values():
+        if entry.domain != "sensor":
+            continue
+        eid = entry.entity_id.lower()
+        if any(kw in eid for kw in ("driving_range", "ev_driving_range")):
+            range_entity = entry.entity_id
+            break
+
+    return soc_entity, plugged_in_entity, target_soc_entity, range_entity
+
+
 class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the SolarFriend config flow."""
 
@@ -398,7 +536,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
         self._data: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
-    # Step 1 — Name
+    # Step 0 — EV option (first screen)
     # ------------------------------------------------------------------
 
     async def async_step_user(
@@ -407,6 +545,24 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
 
+        if user_input is not None:
+            self._data[CONF_EV_CHARGING_ENABLED] = user_input[CONF_EV_CHARGING_ENABLED]
+            return await self.async_step_name()
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {vol.Optional(CONF_EV_CHARGING_ENABLED, default=False): bool}
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Step 1 — Name
+    # ------------------------------------------------------------------
+
+    async def async_step_name(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -414,7 +570,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_inverter_type()
 
         return self.async_show_form(
-            step_id="user",
+            step_id="name",
             data_schema=vol.Schema(
                 {vol.Required(CONF_NAME, default=DEFAULT_NAME): cv.string}
             ),
@@ -700,10 +856,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update({k: v for k, v in user_input.items() if v})
-            return self.async_create_entry(
-                title=self._data[CONF_NAME],
-                data=self._data,
-            )
+            return await self.async_step_ev_charger_type()
 
         # For klatremis: only show entities from the Deye/ESPHome device.
         if self._data.get(CONF_INVERTER_TYPE) == "deye_klatremis":
@@ -761,4 +914,215 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="deye_control",
             data_schema=schema,
             description_placeholders={"detected": str(detected)},
+        )
+
+    # ------------------------------------------------------------------
+    # Step 9 — EV charger type
+    # ------------------------------------------------------------------
+
+    async def async_step_ev_charger_type(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if not self._data.get(CONF_EV_CHARGING_ENABLED):
+            return await self.async_step_finish()
+
+        if user_input is not None:
+            self._data[CONF_EV_CHARGER_TYPE] = user_input[CONF_EV_CHARGER_TYPE]
+            return await self.async_step_ev_charger_entities()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_EV_CHARGER_TYPE, default="easee"): vol.In(
+                    {
+                        "easee": "Easee (Skandinavien)",
+                        "manual": "Manuel (andre ladebokse)",
+                    }
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="ev_charger_type",
+            data_schema=schema,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 10 — EV charger entities (auto-detect)
+    # ------------------------------------------------------------------
+
+    async def async_step_ev_charger_entities(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self._data.update({k: v for k, v in user_input.items() if v})
+            return await self.async_step_vehicle_type()
+
+        charger_type = self._data.get(CONF_EV_CHARGER_TYPE, "manual")
+
+        if charger_type == "easee":
+            detected_status, detected_power, detected_charger_id = (
+                await self.hass.async_add_executor_job(_detect_easee_entities, self.hass)
+            )
+
+            def _status_key() -> vol.Required | vol.Optional:
+                return (
+                    vol.Required(CONF_EV_CHARGER_STATUS_ENTITY, default=detected_status)
+                    if detected_status
+                    else vol.Required(CONF_EV_CHARGER_STATUS_ENTITY)
+                )
+
+            def _power_key() -> vol.Optional:
+                return (
+                    vol.Optional(CONF_EV_CHARGER_POWER_ENTITY, default=detected_power)
+                    if detected_power
+                    else vol.Optional(CONF_EV_CHARGER_POWER_ENTITY)
+                )
+
+            def _id_key() -> vol.Optional:
+                return (
+                    vol.Optional(CONF_EV_CHARGER_ID, default=detected_charger_id)
+                    if detected_charger_id
+                    else vol.Optional(CONF_EV_CHARGER_ID)
+                )
+
+            schema = vol.Schema(
+                {
+                    _status_key(): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    _power_key(): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    _id_key(): cv.string,
+                    vol.Optional(CONF_EV_MAX_CHARGE_KW, default=7.4): vol.Coerce(float),
+                }
+            )
+        else:
+            schema = vol.Schema(
+                {
+                    vol.Required(CONF_EV_CHARGER_STATUS_ENTITY): EntitySelector(
+                        EntitySelectorConfig()
+                    ),
+                    vol.Optional(CONF_EV_CHARGER_POWER_ENTITY): EntitySelector(
+                        EntitySelectorConfig()
+                    ),
+                    vol.Optional(CONF_EV_CHARGER_PAUSE_SWITCH): EntitySelector(
+                        EntitySelectorConfig(domain="switch")
+                    ),
+                    vol.Optional(CONF_EV_MAX_CHARGE_KW, default=7.4): vol.Coerce(float),
+                }
+            )
+
+        return self.async_show_form(
+            step_id="ev_charger_entities",
+            data_schema=schema,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 11 — Vehicle type
+    # ------------------------------------------------------------------
+
+    async def async_step_vehicle_type(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self._data[CONF_VEHICLE_TYPE] = user_input[CONF_VEHICLE_TYPE]
+            if user_input[CONF_VEHICLE_TYPE] == "none":
+                return await self.async_step_finish()
+            return await self.async_step_vehicle_entities()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_VEHICLE_TYPE, default="none"): vol.In(
+                    {
+                        "kia_hyundai": "Kia / Hyundai (kia_uvo integration)",
+                        "manual": "Manuel (vælg selv sensorer)",
+                        "none": "Ingen bil-integration",
+                    }
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="vehicle_type",
+            data_schema=schema,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 12 — Vehicle entities (auto-detect)
+    # ------------------------------------------------------------------
+
+    async def async_step_vehicle_entities(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self._data.update({k: v for k, v in user_input.items() if v})
+            return await self.async_step_finish()
+
+        vehicle_type = self._data.get(CONF_VEHICLE_TYPE, "manual")
+
+        if vehicle_type == "kia_hyundai":
+            detected_soc, detected_plugged_in, detected_target_soc, detected_range = (
+                await self.hass.async_add_executor_job(_detect_kia_entities, self.hass)
+            )
+        else:
+            detected_soc, detected_plugged_in, detected_target_soc, detected_range = (
+                None, None, None, None
+            )
+
+        def _soc_key() -> vol.Required | vol.Optional:
+            return (
+                vol.Required(CONF_VEHICLE_SOC_ENTITY, default=detected_soc)
+                if detected_soc
+                else vol.Required(CONF_VEHICLE_SOC_ENTITY)
+            )
+
+        def _plugged_in_key() -> vol.Optional:
+            return (
+                vol.Optional(CONF_VEHICLE_PLUGGED_IN_ENTITY, default=detected_plugged_in)
+                if detected_plugged_in
+                else vol.Optional(CONF_VEHICLE_PLUGGED_IN_ENTITY)
+            )
+
+        def _target_soc_key() -> vol.Optional:
+            return (
+                vol.Optional(CONF_VEHICLE_TARGET_SOC_ENTITY, default=detected_target_soc)
+                if detected_target_soc
+                else vol.Optional(CONF_VEHICLE_TARGET_SOC_ENTITY)
+            )
+
+        def _range_key() -> vol.Optional:
+            return (
+                vol.Optional(CONF_VEHICLE_RANGE_ENTITY, default=detected_range)
+                if detected_range
+                else vol.Optional(CONF_VEHICLE_RANGE_ENTITY)
+            )
+
+        schema = vol.Schema(
+            {
+                _soc_key(): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                _plugged_in_key(): EntitySelector(
+                    EntitySelectorConfig(domain="binary_sensor")
+                ),
+                _target_soc_key(): EntitySelector(
+                    EntitySelectorConfig(domain=["sensor", "number"])
+                ),
+                _range_key(): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Required("vehicle_battery_capacity_kwh", default=77.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=10, max=200)
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="vehicle_entities",
+            data_schema=schema,
+        )
+
+    # ------------------------------------------------------------------
+    # Finish — create config entry
+    # ------------------------------------------------------------------
+
+    async def async_step_finish(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_create_entry(
+            title=self._data[CONF_NAME],
+            data=self._data,
         )

@@ -6,17 +6,33 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 from .coordinator import SolarFriendCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR, Platform.NUMBER]
+PLATFORMS = [Platform.SENSOR, Platform.NUMBER, Platform.SWITCH, Platform.SELECT]
+
+
+async def _cleanup_orphaned_ev_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Fjern orphaned SolarFriend entiteter der ikke har entry_id som prefix i unique_id."""
+    registry = er.async_get(hass)
+    to_remove = [
+        entity.entity_id
+        for entity in registry.entities.values()
+        if entity.platform == "solarfriend"
+        and not entity.unique_id.startswith(entry.entry_id)
+    ]
+    for entity_id in to_remove:
+        _LOGGER.info("Fjerner orphaned entitet: %s", entity_id)
+        registry.async_remove(entity_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Create coordinator, do first refresh, forward to platforms."""
+    await _cleanup_orphaned_ev_entities(hass, entry)
     coordinator = SolarFriendCoordinator(hass, entry)
     await coordinator.async_startup()
     await coordinator.async_config_entry_first_refresh()

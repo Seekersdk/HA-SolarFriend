@@ -2,6 +2,13 @@
   "config": {
     "step": {
       "user": {
+        "title": "EV-opladning",
+        "description": "Vil du styre opladning af elbil med solenergi?",
+        "data": {
+          "ev_charging_enabled": "Aktiver EV-opladning med solenergi"
+        }
+      },
+      "name": {
         "title": "SolarFriend opsætning",
         "description": "Giv din SolarFriend integration et navn.",
         "data": {
@@ -77,10 +84,54 @@
           "deye_grid_charge_current": "Maksimal netladningsstrøm",
           "deye_energy_priority": "Energiprioritering"
         }
+      },
+      "ev_charger_type": {
+        "title": "Vælg ladeboks",
+        "description": "Vælg hvilken type ladeboks du bruger til din elbil.",
+        "data": {
+          "ev_charger_type": "Ladeboks-type"
+        }
+      },
+      "ev_charger_entities": {
+        "title": "Ladeboks entiteter",
+        "description": "SolarFriend har fundet følgende entiteter. Kontrollér og juster om nødvendigt.",
+        "data": {
+          "ev_charger_status_entity": "Status sensor",
+          "ev_charger_power_entity": "Effektsensor (valgfri)",
+          "ev_charger_id": "Charger ID (valgfri)",
+          "ev_charger_pause_switch": "Pause-switch (valgfri)",
+          "ev_max_charge_kw": "Max ladeeffekt (kW)"
+        }
+      },
+      "vehicle_type": {
+        "title": "Vælg bil-integration",
+        "description": "Vælg hvilken integration der bruges til at aflæse bilens batteri.",
+        "data": {
+          "vehicle_type": "Bil-integration"
+        }
+      },
+      "vehicle_entities": {
+        "title": "Bil entiteter",
+        "description": "Vælg sensorer fra din bil-integration.",
+        "data": {
+          "vehicle_soc_entity": "Batteri SOC sensor",
+          "vehicle_plugged_in_entity": "Tilsluttet sensor (valgfri)",
+          "vehicle_target_soc_entity": "Mål SOC entitet (valgfri)",
+          "vehicle_battery_capacity_kwh": "Batteristørrelse (kWh)",
+          "ev_charge_mode": "Ladetilstand"
+        }
+      },
+      "ev_departure": {
+        "title": "Afgangstid",
+        "description": "Hvornår skal bilen senest være fuldt opladet? (HH:MM)",
+        "data": {
+          "ev_departure_time": "Afgangstid"
+        }
       }
     },
     "error": {
-      "min_soc_above_max": "Minimum SOC skal være lavere end maksimum SOC."
+      "min_soc_above_max": "Minimum SOC skal være lavere end maksimum SOC.",
+      "invalid_time_format": "Ugyldig tidsformat — brug HH:MM, fx 07:30."
     },
     "abort": {
       "single_instance_allowed": "SolarFriend er allerede opsat."

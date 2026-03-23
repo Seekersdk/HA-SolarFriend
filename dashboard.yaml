@@ -270,3 +270,123 @@ views:
                 name: Gennemsnit pris/kWh
               - entity: sensor.solarfriend_charge_threshold
                 name: Charge threshold
+      - type: custom:apexcharts-card
+        header:
+          title: ⚡ EV Ladeplan
+          show: true
+          show_states: true
+          colorize_states: true
+        graph_span: 24h
+        span:
+          start: hour
+        update_interval: 60s
+        apex_config:
+          chart:
+            height: 320
+            toolbar:
+              show: false
+          xaxis:
+            type: datetime
+            labels:
+              datetimeFormatter:
+                hour: HH:mm
+          yaxis:
+            - id: soc
+              min: 0
+              max: 100
+              decimalsInFloat: 0
+              title:
+                text: SOC %
+            - id: power
+              opposite: true
+              min: 0
+              decimalsInFloat: 0
+              title:
+                text: Watt
+          tooltip:
+            x:
+              format: HH:mm
+          annotations:
+            xaxis:
+              - x: |-
+                  [[[ 
+                    const dep = entity.attributes.departure;
+                    if (!dep) return null;
+                    const [h, m] = dep.split(':');
+                    const now = new Date();
+                    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parseInt(h), parseInt(m));
+                    return d.getTime();
+                  ]]]
+                borderColor: '#FF4560'
+                strokeDashArray: 4
+                label:
+                  text: Afgang
+                  style:
+                    color: '#fff'
+                    background: '#FF4560'
+                    fontSize: 11px
+        all_series_config:
+          stroke_width: 2
+        series:
+          - entity: sensor.solarfriend_ev_ev_plan
+            name: Bil SOC
+            yaxis_id: soc
+            color: '#00E396'
+            type: area
+            opacity: 0.2
+            data_generator: |
+              return entity.attributes.hourly_plan.map(h => [
+                new Date(h.hour).getTime(),
+                h.soc
+              ]);
+          - entity: sensor.solarfriend_ev_ev_plan
+            name: Sol-ladning
+            yaxis_id: power
+            color: '#FFB800'
+            type: area
+            opacity: 0.6
+            stroke_width: 0
+            data_generator: |
+              return entity.attributes.hourly_plan.map(h => [
+                new Date(h.hour).getTime(),
+                h.solar_w
+              ]);
+          - entity: sensor.solarfriend_ev_ev_plan
+            name: Net-ladning
+            yaxis_id: power
+            color: '#008FFB'
+            type: area
+            opacity: 0.6
+            stroke_width: 0
+            data_generator: |
+              return entity.attributes.hourly_plan.map(h => [
+                new Date(h.hour).getTime(),
+                h.grid_w
+              ]);
+          - entity: sensor.solarfriend_ev_ev_plan
+            name: Mål SOC
+            yaxis_id: soc
+            color: '#FF4560'
+            type: line
+            stroke_width: 1
+            curve: stepline
+            data_generator: |
+              const target = entity.attributes.target_soc;
+              return entity.attributes.hourly_plan.map(h => [
+                new Date(h.hour).getTime(),
+                target
+              ]);
+          - entity: sensor.solarfriend_ev_ev_plan
+            name: Min SOC
+            yaxis_id: soc
+            color: '#FFA500'
+            type: line
+            stroke_width: 1
+            curve: stepline
+            data_generator: |
+              const minSoc = entity.attributes.min_soc;
+              if (!minSoc || minSoc <= 0) return [];
+              return entity.attributes.hourly_plan.map(h => [
+                new Date(h.hour).getTime(),
+                minSoc
+              ]);

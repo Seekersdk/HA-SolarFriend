@@ -19,7 +19,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import SolarFriendCoordinator, SolarFriendData
+from .coordinator import SolarFriendCoordinator, SolarFriendData, ev_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -505,10 +505,95 @@ async def async_setup_entry(
 ) -> None:
     coordinator: SolarFriendCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    async_add_entities(
+    entities: list = [
         SolarFriendSensor(coordinator, entry, description)
         for description in SENSOR_DESCRIPTIONS
-    )
+    ]
+
+    if entry.data.get("ev_charging_enabled", False):
+        entities.extend([
+            SolarFriendEVSensor(
+                coordinator, "ev_charging_power", "Ladning",
+                UnitOfPower.WATT, SensorDeviceClass.POWER,
+                SensorStateClass.MEASUREMENT, "mdi:ev-station",
+                lambda d: d.ev_charging_power,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_vehicle_soc", "Bil SOC",
+                PERCENTAGE, SensorDeviceClass.BATTERY,
+                SensorStateClass.MEASUREMENT, "mdi:battery-electric-vehicle",
+                lambda d: d.ev_vehicle_soc,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_surplus_w", "Sol-overskud",
+                UnitOfPower.WATT, SensorDeviceClass.POWER,
+                SensorStateClass.MEASUREMENT, "mdi:solar-power",
+                lambda d: d.ev_surplus_w,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_strategy_reason", "Strategi",
+                None, None, None, "mdi:brain",
+                lambda d: d.ev_strategy_reason,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_vehicle_soc_kwh", "Bil SOC kWh",
+                UnitOfEnergy.KILO_WATT_HOUR, SensorDeviceClass.ENERGY,
+                None, "mdi:battery-electric-vehicle",
+                lambda d: d.ev_vehicle_soc_kwh,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_needed_kwh", "Manglende kWh",
+                UnitOfEnergy.KILO_WATT_HOUR, SensorDeviceClass.ENERGY,
+                None, "mdi:battery-arrow-up",
+                lambda d: d.ev_needed_kwh,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_hours_to_departure", "Timer til afgang",
+                "h", None, SensorStateClass.MEASUREMENT, "mdi:car-clock",
+                lambda d: d.ev_hours_to_departure,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_charge_mode", "Lademodus",
+                None, None, None, "mdi:ev-station",
+                lambda d: d.ev_charge_mode,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_target_soc", "Target SOC",
+                PERCENTAGE, SensorDeviceClass.BATTERY,
+                SensorStateClass.MEASUREMENT, "mdi:battery-charging-80",
+                lambda d: d.ev_target_soc,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_target_w", "Target Effekt",
+                UnitOfPower.WATT, SensorDeviceClass.POWER,
+                SensorStateClass.MEASUREMENT, "mdi:lightning-bolt",
+                lambda d: d.ev_target_w,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_phases", "Antal Faser",
+                None, None, None, "mdi:numeric",
+                lambda d: d.ev_phases,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_min_soc_fra_km", "Min SOC fra km",
+                PERCENTAGE, SensorDeviceClass.BATTERY,
+                SensorStateClass.MEASUREMENT, "mdi:map-marker-distance",
+                lambda d: d.ev_min_soc_from_range,
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_nodopladning", "Nødopladning aktiv",
+                None, None, None, "mdi:alert-circle",
+                lambda d: "Ja" if d.ev_emergency_charging else "Nej",
+            ),
+            SolarFriendEVSensor(
+                coordinator, "ev_charger_status", "Lader status",
+                None, None, None, "mdi:ev-station",
+                lambda d: d.ev_charger_status,
+            ),
+            SolarFriendEVPlanSensor(coordinator),
+        ])
+
+    async_add_entities(entities)
 
 
 # ---------------------------------------------------------------------------
@@ -571,3 +656,101 @@ class SolarFriendSensor(CoordinatorEntity[SolarFriendCoordinator], SensorEntity)
         if source and source in self.coordinator.data.unavailable:
             return False
         return True
+
+
+class SolarFriendEVSensor(CoordinatorEntity[SolarFriendCoordinator], SensorEntity):
+    """EV charging sensor — only created when ev_charging_enabled."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: SolarFriendCoordinator,
+        key: str,
+        name: str,
+        unit: str | None,
+        device_class: SensorDeviceClass | None,
+        state_class: SensorStateClass | None,
+        icon: str,
+        value_fn: Callable[[SolarFriendData], Any],
+    ) -> None:
+        super().__init__(coordinator)
+        self._key = key
+        self._value_fn = value_fn
+        self._attr_name = name
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_ev_{key}"
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = device_class
+        self._attr_state_class = state_class
+        self._attr_icon = icon
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return ev_device_info(self.coordinator)
+
+    @property
+    def native_value(self) -> float | str | None:
+        if self.coordinator.data is None:
+            return None
+        try:
+            return self._value_fn(self.coordinator.data)
+        except Exception:  # noqa: BLE001
+            return None
+
+
+class SolarFriendEVPlanSensor(CoordinatorEntity[SolarFriendCoordinator], SensorEntity):
+    """EV charging plan chart sensor — shows expected SOC at departure with hourly breakdown.
+
+    apexcharts-card data_generator example:
+
+      type: custom:apexcharts-card
+      entities:
+        - entity: sensor.solarfriend_ev_plan
+          data_generator: |
+            const plan = entity.attributes.hourly_plan || [];
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            return plan.map(h => {
+              const [hh] = h.hour.split(':').map(Number);
+              return [today.getTime() + hh * 3600000, h.soc];
+            });
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "EV Plan"
+    _attr_icon = "mdi:chart-timeline-variant"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: SolarFriendCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_ev_plan"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return ev_device_info(self.coordinator)
+
+    @property
+    def native_value(self) -> float | None:
+        """Expected SOC at departure (last entry in plan)."""
+        if self.coordinator.data is None:
+            return None
+        plan = self.coordinator.data.ev_plan
+        if not plan:
+            return None
+        return plan[-1]["soc"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        data = self.coordinator.data
+        dep = self.coordinator.ev_next_departure
+        return {
+            "hourly_plan": data.ev_plan,
+            "departure": dep.strftime("%H:%M"),
+            "target_soc": data.ev_target_soc,
+            "current_soc": data.ev_vehicle_soc,
+            "charge_mode": data.ev_charge_mode,
+        }

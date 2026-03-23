@@ -1,14 +1,16 @@
 """SolarFriend DataUpdateCoordinator."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, Event, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as ha_dt
@@ -19,6 +21,9 @@ from .battery_tracker import BatteryTracker
 from .battery_optimizer import BatteryOptimizer, OptimizeResult
 from .forecast_adapter import ForecastAdapter, ForecastData, get_forecast_for_period
 from .inverter_controller import InverterController
+from .ev_charger_controller import EVChargerController
+from .vehicle_controller import VehicleController
+from .ev_optimizer import EVContext, EVOptimizer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,6 +108,46 @@ class SolarFriendData:
     # Which sensors were unavailable this cycle
     unavailable: list[str] = field(default_factory=list)
 
+    # EV charging
+    ev_charging_enabled: bool = False
+    ev_charging_power: float = 0.0
+    ev_vehicle_soc: float = 0.0
+    ev_target_soc: float = 80.0
+    ev_surplus_w: float = 0.0
+    ev_strategy_reason: str = ""
+    ev_charger_status: str = "disconnected"
+    ev_target_w: float = 0.0
+    ev_phases: int = 0
+    ev_vehicle_soc_kwh: float = 0.0
+    ev_needed_kwh: float = 0.0
+    ev_hours_to_departure: float = 0.0
+    ev_charge_mode: str = ""
+    ev_min_range_km: float = 0.0
+    ev_emergency_charging: bool = False
+    ev_min_soc_from_range: float = 0.0
+    ev_plan: list = field(default_factory=list)
+
+
+def ev_device_info(coordinator: "SolarFriendCoordinator") -> DeviceInfo:
+    """Shared EV DeviceInfo used by all EV entities."""
+    entry = coordinator._entry
+    charger_type_name = {"easee": "Easee", "manual": "Manuel ladeboks"}.get(
+        entry.data.get("ev_charger_type", "manual"),
+        entry.data.get("ev_charger_type", "manual"),
+    )
+    vehicle_type_name = {
+        "kia_hyundai": "Kia / Hyundai",
+        "manual": "Manuel bil",
+        "none": "Ingen bil",
+    }.get(entry.data.get("vehicle_type", "none"), entry.data.get("vehicle_type", "none"))
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{entry.entry_id}_ev")},
+        name="SolarFriend EV",
+        manufacturer=charger_type_name,
+        model=vehicle_type_name,
+        via_device=(DOMAIN, entry.entry_id),
+    )
+
 
 class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
     """Fetch and derive SolarFriend data on a fixed interval."""
@@ -115,6 +160,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             update_interval=UPDATE_INTERVAL,
         )
         self._entry = entry
+        self.config_entry = entry  # public alias for use by entity unique_ids
         self._price_history: list[float] = []
         self._night_prices: dict[int, float] = {}  # hour → min price seen this night
         self._profile = ConsumptionProfile()
@@ -144,6 +190,33 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         # Event listener unsubscribe handles
         self._unsub_listeners: list[Callable[[], None]] = []
+
+        # EV charging
+        self.ev_charge_mode: str = "solar_only"  # overwritten by SolarFriendEVModeSelect on restore
+        self.ev_target_soc_override: float | None = None
+        self.ev_departure_time: time = time(7, 30)  # overwritten by SolarFriendEVDepartureTime on restore
+        self.ev_min_range_km: float = 0.0
+        self.vehicle_battery_kwh: float = float(
+            entry.data.get("vehicle_battery_capacity_kwh", 77.0)
+        )
+        self._ev_enabled: bool = entry.data.get("ev_charging_enabled", False)
+        self._ev_charger: EVChargerController | None = None
+        self._vehicle: VehicleController | None = None
+        self._ev_optimizer: EVOptimizer | None = None
+        self._ev_last_action_time: datetime | None = None
+        self._ev_currently_charging: bool = False
+        self._ev_sync_on_startup: bool = True
+        self.ev_charging_allowed: bool = True  # styres af SolarFriendEVSwitch
+
+        if self._ev_enabled:
+            self._ev_charger = EVChargerController.from_config(hass, entry)
+            self._vehicle = VehicleController.from_config(hass, entry)
+            self._ev_optimizer = EVOptimizer()
+            _LOGGER.info(
+                "EV charging enabled: charger=%s vehicle=%s",
+                entry.data.get("ev_charger_type", "none"),
+                entry.data.get("vehicle_type", "none"),
+            )
 
     # ------------------------------------------------------------------
     # Startup
@@ -691,14 +764,15 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         current_soc = data.battery_soc or 35.0
         capacity_kwh = float(cfg.get("battery_capacity_kwh", 10.0))
         min_soc = float(cfg.get("battery_min_soc", 10.0))
-        max_soc = float(cfg.get("battery_max_soc", 90.0))
+        max_soc = 100.0  # forecast shows physical maximum, not optimizer limit
         current_hour = now.hour
 
         solcast_hourly: dict[int, float] = {}
         if data.forecast_data and data.forecast_data.hourly_forecast:
             for slot in data.forecast_data.hourly_forecast:
                 h = slot["period_start"].hour
-                solcast_hourly[h] = slot.get("pv_estimate_kwh", 0.0) * 1000  # → W
+                # Accumulate both 30-min slots → full hourly kWh stored as *1000 for later /1000
+                solcast_hourly[h] = solcast_hourly.get(h, 0.0) + slot.get("pv_estimate_kwh", 0.0) * 1000
 
         forecast_soc: list = []
         soc = current_soc
@@ -754,6 +828,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             # Pull back whatever the optimizer wrote
             data.optimize_result = self.data.optimize_result if self.data else data.optimize_result
 
+        # ── EV charging ───────────────────────────────────────────────────
+        if self._ev_enabled:
+            self.data = data  # type: ignore[assignment]
+            await self._update_ev()
+
         _LOGGER.debug(
             "Update: PV=%.0fW load=%.0fW battery=%.0fW SOC=%.1f%% "
             "price=%.4f avg=%.4f strategy=%s level=%s "
@@ -764,6 +843,291 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         )
 
         return data
+
+    def _get_raw_prices(self) -> list[dict]:
+        """Read raw price list from the configured price sensor."""
+        cfg = self._entry.data
+        price_sensor_id = cfg.get("price_sensor", "")
+        if not price_sensor_id:
+            return []
+        price_state = self.hass.states.get(price_sensor_id)
+        if price_state is None:
+            return []
+        raw_today: list = price_state.attributes.get("raw_today", []) or []
+        raw_tomorrow: list = price_state.attributes.get("raw_tomorrow", []) or []
+        raw_prices = raw_today + raw_tomorrow
+        if not raw_prices:
+            for attr_key in ("today", "prices"):
+                candidate = price_state.attributes.get(attr_key)
+                if isinstance(candidate, list) and candidate:
+                    raw_prices = candidate
+                    break
+        return raw_prices
+
+    async def _update_ev(self) -> None:
+        """Run EV optimizer and act on the result."""
+        try:
+            charger_status = await self._ev_charger.get_status()
+            charger_power = await self._ev_charger.get_power_w()
+            vehicle_soc = self._vehicle.get_soc()
+            vehicle_target_soc = (
+                self.ev_target_soc_override
+                if self.ev_target_soc_override is not None
+                else self._vehicle.get_target_soc()
+            )
+
+            # Synkroniser _ev_currently_charging fra faktisk status ved opstart
+            if self._ev_sync_on_startup:
+                self._ev_sync_on_startup = False
+                self._ev_currently_charging = charger_status == "charging"
+                if self._ev_currently_charging:
+                    _LOGGER.info("EV: synkroniseret til charging ved opstart")
+
+            # Manuel EV-switch: hvis slukket → behandl som disconnected
+            if not self.ev_charging_allowed:
+                charger_status = "disconnected"
+                _LOGGER.debug("EV: ladning deaktiveret af manuel switch")
+
+            vehicle_efficiency = float(
+                self._entry.data.get("vehicle_efficiency_km_per_kwh", 6.0)
+            )
+            driving_range_km = self._vehicle.get_driving_range()
+            min_range_km = self.ev_min_range_km
+
+            ctx = EVContext(
+                pv_power_w=self.data.pv_power,
+                load_power_w=self.data.load_power,
+                battery_charging_w=self.data.battery_power,
+                battery_soc=self.data.battery_soc,
+                battery_capacity_kwh=float(
+                    self._entry.data.get("battery_capacity_kwh", 10.0)
+                ),
+                battery_min_soc=float(
+                    self._entry.data.get("battery_min_soc", 10.0)
+                ),
+                charger_status=charger_status,
+                currently_charging=self._ev_currently_charging,
+                vehicle_soc=vehicle_soc,
+                vehicle_capacity_kwh=self.vehicle_battery_kwh,
+                vehicle_target_soc=vehicle_target_soc,
+                departure=self.ev_next_departure,
+                current_price=self.data.price,
+                raw_prices=self._get_raw_prices(),
+                max_charge_kw=float(
+                    self._entry.data.get("ev_max_charge_kw", 7.4)
+                ),
+                driving_range_km=driving_range_km,
+                min_range_km=min_range_km,
+                vehicle_efficiency_km_per_kwh=vehicle_efficiency,
+                now=ha_dt.now(),
+            )
+
+            ev_result = self._ev_optimizer.optimize(ctx, mode=self.ev_charge_mode)
+
+            # Opdater data FØRST — altid konsistente sensorer selv hvis service calls fejler
+            self.data.ev_charging_enabled = True
+            self.data.ev_charging_power = charger_power
+            self.data.ev_vehicle_soc = vehicle_soc
+            self.data.ev_target_soc = vehicle_target_soc
+            self.data.ev_surplus_w = ev_result.surplus_w
+            self.data.ev_strategy_reason = ev_result.reason
+            self.data.ev_charger_status = charger_status
+            self.data.ev_target_w = ev_result.target_w if ev_result.should_charge else 0.0
+            self.data.ev_phases = ev_result.phases if ev_result.should_charge else 0
+            self.data.ev_vehicle_soc_kwh = round(
+                vehicle_soc / 100 * self.vehicle_battery_kwh, 2
+            )
+            self.data.ev_needed_kwh = round(
+                max(0.0, (vehicle_target_soc - vehicle_soc) / 100 * self.vehicle_battery_kwh), 2
+            )
+            departure = self.ev_next_departure
+            self.data.ev_hours_to_departure = round(
+                (departure - ha_dt.now()).total_seconds() / 3600, 1
+            )
+            self.data.ev_charge_mode = self.ev_charge_mode
+            self.data.ev_min_range_km = min_range_km
+            self.data.ev_emergency_charging = ev_result.is_emergency
+            # Compute min SOC needed to cover min_range_km (for sensor display)
+            if min_range_km > 0 and vehicle_efficiency > 0 and self.vehicle_battery_kwh > 0:
+                self.data.ev_min_soc_from_range = min(
+                    100.0,
+                    min_range_km / vehicle_efficiency / self.vehicle_battery_kwh * 100,
+                )
+            else:
+                self.data.ev_min_soc_from_range = 0.0
+
+            # Anti-flap: vent mindst 5 min mellem handlinger
+            now = ha_dt.now()
+            can_act = (
+                self._ev_last_action_time is None
+                or (now - self._ev_last_action_time).total_seconds() > 300
+            )
+
+            if can_act:
+                if ev_result.should_charge and not self._ev_currently_charging:
+                    await self._ev_charger.resume()
+                    await asyncio.sleep(2)  # FIX 3: vent på Easee at komme ud af pause
+                    await self._ev_charger.set_power(ev_result.target_w, ev_result.phases)
+                    self._ev_currently_charging = True
+                    self._ev_last_action_time = now
+                    _LOGGER.info(
+                        "EV: start ladning %d-fase %.1fA (%.0fW) — %s",
+                        ev_result.phases, ev_result.target_amps,
+                        ev_result.target_w, ev_result.reason,
+                    )
+
+                elif ev_result.should_charge and self._ev_currently_charging:
+                    await self._ev_charger.set_power(ev_result.target_w, ev_result.phases)
+
+                elif not ev_result.should_charge and self._ev_currently_charging:
+                    await self._ev_charger.pause()
+                    self._ev_currently_charging = False
+                    self._ev_last_action_time = now
+                    _LOGGER.info("EV: stop ladning — %s", ev_result.reason)
+
+            # Compute EV plan after data is updated
+            self.data.ev_plan = self._compute_ev_plan()
+
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.warning("EV update fejlede: %s", e)
+
+    def _compute_ev_plan(self) -> list[dict]:
+        """Simulate EV charging hour-by-hour from now until departure.
+
+        Returns a list of dicts with keys: hour (ISO timestamp), soc, solar_w, grid_w, total_w.
+
+        hybrid / grid_schedule logic:
+          1. Calculate how many hours of full charging are needed to reach target_soc.
+          2. Pick the cheapest N hour-slots within the window.
+          3. In cheap slots: charge at full rate (solar covers what it can, grid tops up).
+          4. Outside cheap slots (hybrid) or in non-scheduled slots (grid_schedule):
+             charge only when solar surplus >= MIN_SURPLUS_W threshold.
+          solar_only: never use grid — solar surplus only.
+        """
+        if self.data is None:
+            return []
+
+        import math
+
+        # Minimum surplus to start 1-phase charging (mirrors ev_optimizer.MIN_SURPLUS_W)
+        _MIN_SURPLUS_W = 1410.0
+
+        now = ha_dt.now()
+        departure = self.ev_next_departure
+        current_soc = self.data.ev_vehicle_soc or 0.0
+        target_soc = self.data.ev_target_soc or 80.0
+        capacity_kwh = max(0.1, self.vehicle_battery_kwh)
+        max_charge_kw = float(self._entry.data.get("ev_max_charge_kw", 7.4))
+        max_charge_w = max_charge_kw * 1000.0
+        mode = self.ev_charge_mode
+
+        # ── Solar forecast lookup by hour (W) ────────────────────────────
+        solar_by_hour: dict[int, float] = {}
+        if self.data.forecast_data and self.data.forecast_data.hourly_forecast:
+            for slot in self.data.forecast_data.hourly_forecast:
+                h_slot = slot["period_start"].hour
+                # Accumulate both 30-min slots → full hourly kWh, then *2000 gives avg W for surplus check
+                solar_by_hour[h_slot] = solar_by_hour.get(h_slot, 0.0) + slot.get("pv_estimate_kwh", 0.0) * 1000.0
+
+        hours_in_window = max(1, int((departure - now).total_seconds() / 3600) + 1)
+        hours_in_window = min(hours_in_window, 24)
+
+        slot_base = now.replace(minute=0, second=0, microsecond=0)
+        slot_dts = [slot_base + timedelta(hours=i) for i in range(hours_in_window)]
+
+        # ── Price lookup mapped to slot datetime ─────────────────────────
+        # Build {hour_int: price} then map to slot_dts
+        price_by_hour: dict[int, float] = {}
+        for p in self._get_raw_prices():
+            h: int | None = None
+            if "hour" in p:
+                try:
+                    h = int(p["hour"])
+                except (TypeError, ValueError):
+                    pass
+            elif "start" in p:
+                try:
+                    dt = datetime.fromisoformat(str(p["start"]))
+                    if dt.tzinfo is not None:
+                        dt = ha_dt.as_local(dt)
+                    h = dt.hour
+                except (ValueError, TypeError):
+                    pass
+            if h is not None and "price" in p:
+                price_by_hour[h] = float(p["price"])
+
+        # ── Determine cheap slots for hybrid / grid_schedule ─────────────
+        cheap_slot_set: set[int] = set()  # indices into slot_dts
+        if mode in ("hybrid", "grid_schedule"):
+            needed_kwh = max(0.0, (target_soc - current_soc) / 100.0 * capacity_kwh)
+            needed_hours = math.ceil(needed_kwh / max_charge_kw) if max_charge_kw > 0 else 0
+            # Sort slots by price, pick cheapest N
+            priced = sorted(
+                range(hours_in_window),
+                key=lambda i: price_by_hour.get(slot_dts[i].hour, 9999.0),
+            )
+            cheap_slot_set = set(priced[:needed_hours])
+
+        # ── Build plan hour by hour ───────────────────────────────────────
+        plan: list[dict] = []
+        soc = current_soc
+
+        for i, hour_dt in enumerate(slot_dts):
+            hour = hour_dt.hour
+            solar_w = solar_by_hour.get(hour, 0.0)
+            load_w = (
+                self.data.consumption_profile_chart[hour]
+                if self.data.consumption_profile_chart
+                else 850.0
+            )
+            surplus_w = max(0.0, solar_w - load_w)
+
+            charge_w = 0.0
+            if soc < target_soc:
+                if mode == "solar_only":
+                    # Only solar surplus — respect minimum threshold
+                    if surplus_w >= _MIN_SURPLUS_W:
+                        charge_w = min(surplus_w, max_charge_w)
+                elif mode in ("hybrid", "grid_schedule"):
+                    if i in cheap_slot_set:
+                        # Cheap slot: charge at full rate; solar covers what it can
+                        charge_w = max_charge_w
+                    elif surplus_w >= _MIN_SURPLUS_W:
+                        # Outside cheap slot: opportunistic solar only
+                        charge_w = min(surplus_w, max_charge_w)
+
+            solar_contribution = min(charge_w, surplus_w)
+            grid_contribution = max(0.0, charge_w - solar_contribution)
+
+            soc_gain = (charge_w / 1000.0) / capacity_kwh * 100.0
+            soc = min(target_soc, soc + soc_gain)
+
+            plan.append({
+                "hour": hour_dt.isoformat(),
+                "soc": round(soc, 1),
+                "solar_w": round(solar_contribution),
+                "grid_w": round(grid_contribution),
+                "total_w": round(charge_w),
+            })
+
+        return plan
+
+    @property
+    def ev_next_departure(self) -> datetime:
+        """Næste afgangstidspunkt — altid i fremtiden.
+
+        Reads from self.ev_departure_time (set by SolarFriendEVDepartureTime on restore).
+        """
+        now = ha_dt.now()
+        dep = now.replace(
+            hour=self.ev_departure_time.hour,
+            minute=self.ev_departure_time.minute,
+            second=0,
+            microsecond=0,
+        )
+        if dep <= now:
+            dep += timedelta(days=1)
+        return dep
 
     async def _maybe_update_profile(self, load_watt: float) -> None:
         """Call async_update on the profile at most once every 15 minutes."""

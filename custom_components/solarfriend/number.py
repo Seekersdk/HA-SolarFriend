@@ -10,16 +10,17 @@ from homeassistant.components.number import (
     NumberEntity,
     NumberEntityDescription,
     NumberMode,
+    RestoreNumber,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, PERCENTAGE, UnitOfPower
+from homeassistant.const import PERCENTAGE, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
-from .coordinator import SolarFriendCoordinator
+from .coordinator import SolarFriendCoordinator, ev_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,10 +89,16 @@ async def async_setup_entry(
 ) -> None:
     coordinator: SolarFriendCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    async_add_entities(
+    entities: list = [
         SolarFriendNumber(coordinator, entry, description)
         for description in NUMBER_DESCRIPTIONS
-    )
+    ]
+
+    if entry.data.get("ev_charging_enabled", False):
+        entities.append(SolarFriendEVTargetSOCNumber(coordinator))
+        entities.append(SolarFriendEVMinRangeNumber(coordinator))
+
+    async_add_entities(entities)
 
 
 class SolarFriendNumber(RestoreEntity, NumberEntity):
@@ -112,7 +119,7 @@ class SolarFriendNumber(RestoreEntity, NumberEntity):
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name=entry.data.get(CONF_NAME, "SolarFriend"),
+            name=entry.data.get("name", "SolarFriend"),
             manufacturer="SolarFriend",
             model="Solar Energy Manager",
         )
@@ -152,3 +159,69 @@ class SolarFriendNumber(RestoreEntity, NumberEntity):
             self.entity_description.config_key,
             value,
         )
+
+
+
+
+class SolarFriendEVTargetSOCNumber(RestoreNumber):
+    """Mål-SOC for EV-oplader (50–100 %, standard 80 %)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Mål-SOC"
+    _attr_icon = "mdi:battery-charging-80"
+    _attr_native_min_value = 50
+    _attr_native_max_value = 100
+    _attr_native_step = 5
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(self, coordinator: SolarFriendCoordinator) -> None:
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_ev_target_soc"
+        self._attr_device_info = ev_device_info(coordinator)
+        self._attr_native_value = 80.0
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last and last.native_value is not None:
+            self._attr_native_value = float(last.native_value)
+        self._coordinator.ev_target_soc_override = self._attr_native_value
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._attr_native_value = value
+        self._coordinator.ev_target_soc_override = value
+        self.async_write_ha_state()
+        _LOGGER.debug("EV mål-SOC sat til %.0f%%", value)
+
+
+class SolarFriendEVMinRangeNumber(RestoreNumber):
+    """Minimum rækkevidde — tving nødopladning hvis under dette (0 = deaktiveret)."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Min Rækkevidde"
+    _attr_icon = "mdi:map-marker-distance"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 500
+    _attr_native_step = 10
+    _attr_native_unit_of_measurement = "km"
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(self, coordinator: SolarFriendCoordinator) -> None:
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_ev_min_range"
+        self._attr_device_info = ev_device_info(coordinator)
+        self._attr_native_value = 0.0
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last and last.native_value is not None:
+            self._attr_native_value = float(last.native_value)
+        self._coordinator.ev_min_range_km = self._attr_native_value
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._attr_native_value = value
+        self._coordinator.ev_min_range_km = value
+        self.async_write_ha_state()
+        _LOGGER.debug("EV min rækkevidde sat til %.0f km", value)
