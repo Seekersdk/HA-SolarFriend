@@ -1,4 +1,4 @@
-"""SolarFriend consumption profile — learns hourly load patterns over time."""
+"""SolarFriend consumption profile - learns hourly load patterns over time."""
 from __future__ import annotations
 
 import logging
@@ -21,12 +21,7 @@ _CONFIDENCE_HIGH = 14
 
 
 def _percentile_filter(values: list[float], percentile: float = 85) -> list[float]:
-    """Return values strictly below the given percentile threshold.
-
-    Removes EV/battery-charging spikes regardless of their absolute level.
-    Falls back to the original list when fewer than 4 values are present or
-    when the filter would eliminate everything.
-    """
+    """Return values strictly below the given percentile threshold."""
     if len(values) < 4:
         return values
     sorted_vals = sorted(values)
@@ -38,7 +33,7 @@ def _percentile_filter(values: list[float], percentile: float = 85) -> list[floa
 
 def _empty_profile() -> dict[int, dict[str, float]]:
     """Return a fresh 24-hour profile with zero samples."""
-    return {hour: {"samples": 0, "avg_watt": 0.0} for hour in range(24)}
+    return {hour: {"samples": 0.0, "avg_watt": 0.0} for hour in range(24)}
 
 
 class ConsumptionProfile:
@@ -73,14 +68,13 @@ class ConsumptionProfile:
                     self._profiles[profile_key][hour]["avg_watt"] = float(entry.get("avg_watt", 0.0))
 
         _LOGGER.debug(
-            "ConsumptionProfile loaded — days_collected=%d confidence=%s",
+            "ConsumptionProfile loaded - days_collected=%d confidence=%s",
             self.days_collected,
             self.confidence,
         )
 
     async def async_save(self, hass: HomeAssistant) -> None:
         """Persist profiles to HA storage."""
-        # Store hour keys as strings (JSON requirement)
         serialisable = {
             profile_key: {
                 str(hour): slot
@@ -100,15 +94,7 @@ class ConsumptionProfile:
         ev_power_w: float = 0.0,
         battery_power_w: float = 0.0,
     ) -> float | None:
-        """Return net household consumption by subtracting EV and grid charging.
-
-        battery_power_w sign convention: positive = discharging, negative = charging.
-        Only grid-charging (negative battery_power_w) is subtracted; discharging
-        simply means the battery is covering house load and is not an extra load.
-
-        Returns None when the result still exceeds 10 kW — something unknown
-        is drawing power and the sample should be skipped.
-        """
+        """Return net household consumption by subtracting EV and grid charging."""
         battery_grid_charge_w = max(0.0, -battery_power_w)
         household_w = load_w - ev_power_w - battery_grid_charge_w
         if household_w < 0:
@@ -128,15 +114,17 @@ class ConsumptionProfile:
         clean = self._clean_load_w(load_watt, ev_power_w, battery_power_w)
         if clean is None:
             _LOGGER.debug(
-                "ConsumptionProfile: skip %.0fW "
-                "(household efter fradrag stadig > 10kW)",
+                "ConsumptionProfile: skip %.0fW (household after subtraction still > 10kW)",
                 load_watt,
             )
             return
 
         _LOGGER.debug(
-            "ConsumptionProfile update: load=%.0fW ev=%.0fW bat=%.0fW → household=%.0fW",
-            load_watt, ev_power_w, battery_power_w, clean,
+            "ConsumptionProfile update: load=%.0fW ev=%.0fW bat=%.0fW -> household=%.0fW",
+            load_watt,
+            ev_power_w,
+            battery_power_w,
+            clean,
         )
 
         now = datetime.now()
@@ -151,8 +139,11 @@ class ConsumptionProfile:
         slot["samples"] = samples + 1
 
         _LOGGER.debug(
-            "ConsumptionProfile: %s hour=%02d → avg=%.1f (n=%d)",
-            profile_key, hour, slot["avg_watt"], slot["samples"],
+            "ConsumptionProfile: %s hour=%02d -> avg=%.1f (n=%d)",
+            profile_key,
+            hour,
+            slot["avg_watt"],
+            slot["samples"],
         )
 
         await self.async_save(hass)
@@ -162,25 +153,25 @@ class ConsumptionProfile:
     # ------------------------------------------------------------------
 
     async def bootstrap_from_history(
-        self, hass: HomeAssistant, entity_id: str, days: int = 14
+        self,
+        hass: HomeAssistant,
+        entity_id: str,
+        days: int = 14,
+        *,
+        force: bool = False,
     ) -> int:
-        """Build a starter profile from HA recorder history.
+        """Build or refresh the profile from HA recorder history."""
+        days = max(1, min(int(days), 14))
 
-        Groups measurements into (weekday/weekend, hour) buckets, filters
-        out EV/battery-charging spikes via the 85th-percentile cutoff, then
-        writes the per-bucket average with samples=1 so live data takes over
-        gradually via the rolling average.
-
-        Returns the number of hour-buckets written (0 on failure or skip).
-        """
-        if self.days_collected >= 3:
+        if not force and self.days_collected >= 3:
             return 0
 
+        from collections import defaultdict
+        from datetime import timedelta
+
+        import homeassistant.util.dt as ha_dt
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.history import get_significant_states
-        import homeassistant.util.dt as ha_dt
-        from datetime import timedelta
-        from collections import defaultdict
 
         end_time = ha_dt.now()
         start_time = end_time - timedelta(days=days)
@@ -189,7 +180,10 @@ class ConsumptionProfile:
             recorder = get_instance(hass)
             states = await recorder.async_add_executor_job(
                 get_significant_states,
-                hass, start_time, end_time, [entity_id],
+                hass,
+                start_time,
+                end_time,
+                [entity_id],
             )
         except Exception as exc:
             _LOGGER.warning("Bootstrap: historik fejl: %s", exc)
@@ -222,21 +216,27 @@ class ConsumptionProfile:
             filtered = _percentile_filter(values, percentile=85)
             avg_watt = sum(filtered) / len(filtered)
             slot = self._profiles[day_type][hour]
-            if slot["samples"] < 5:
+            if force or slot["samples"] < 5:
                 slot["avg_watt"] = round(avg_watt, 1)
-                slot["samples"] = 1
+                # Make bootstrapped buckets immediately usable after restart.
+                slot["samples"] = max(float(slot["samples"]), 3.0)
                 bootstrapped += 1
                 _LOGGER.debug(
-                    "Bootstrap %s h%02d: %d målinger → %d efter filter → %.0fW",
-                    day_type, hour, len(values), len(filtered), avg_watt,
+                    "Bootstrap %s h%02d: %d readings -> %d after filter -> %.0fW",
+                    day_type,
+                    hour,
+                    len(values),
+                    len(filtered),
+                    avg_watt,
                 )
 
         if bootstrapped > 0:
             await self.async_save(hass)
             _LOGGER.info(
-                "Bootstrap: %d buckets fra %d dages historik "
-                "(EV-toppe filtreret via 85. percentil)",
-                bootstrapped, days,
+                "Bootstrap: %d buckets from %d days of history%s",
+                bootstrapped,
+                days,
+                " (forced)" if force else "",
             )
 
         return bootstrapped
@@ -246,10 +246,7 @@ class ConsumptionProfile:
     # ------------------------------------------------------------------
 
     def get_predicted_watt(self, hour: int, is_weekend: bool) -> float:
-        """Return predicted load for a given hour and day-type.
-
-        Falls back to DEFAULT_WATT if fewer than 3 samples have been collected.
-        """
+        """Return predicted load for a given hour and day-type."""
         profile_key = "weekend" if is_weekend else "weekday"
         slot = self._profiles[profile_key][hour]
         if slot["samples"] < 3:
@@ -262,18 +259,17 @@ class ConsumptionProfile:
 
     @property
     def days_collected(self) -> int:
-        """Estimate collected days from the minimum sample count across all hours.
-
-        Each hour accumulates ~4 samples per day (called every 15 min),
-        so days ≈ min_samples / 4.
-        """
-        all_samples = [
-            slot["samples"]
-            for profile in self._profiles.values()
-            for slot in profile.values()
-        ]
-        min_samples = min(all_samples) if all_samples else 0
-        return int(min_samples // 4)
+        """Estimate learning maturity without letting sparse buckets reset progress."""
+        day_estimates: list[int] = []
+        for profile in self._profiles.values():
+            populated = [slot["samples"] for slot in profile.values() if slot["samples"] > 0]
+            if len(populated) < 6:
+                day_estimates.append(0)
+                continue
+            populated.sort()
+            median_samples = populated[len(populated) // 2]
+            day_estimates.append(int(median_samples // 4))
+        return max(day_estimates, default=0)
 
     @property
     def confidence(self) -> str:

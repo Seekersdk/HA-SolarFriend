@@ -1,0 +1,21 @@
+populate_load_model:
+  name: Populate Load Model
+  description: Populate or refresh the learned load model from recorder history.
+  fields:
+    days:
+      name: Days
+      description: Number of days to read from the load sensor history. Capped to 14.
+      default: 14
+      example: 14
+      selector:
+        number:
+          min: 1
+          max: 14
+          step: 1
+          mode: box
+    entry_id:
+      name: Entry ID
+      description: Optional config entry id. If omitted, all SolarFriend entries are populated.
+      example: 0123456789abcdef0123456789abcdef
+      selector:
+        text:

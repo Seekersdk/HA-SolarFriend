@@ -295,13 +295,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                         self._entry, data=new_data
                     )
                     _LOGGER.info(
-                        "ConsumptionProfile bootstrap færdig: %d timer — "
-                        "live data overtager gradvist (n=1 per bucket)",
+                        "ConsumptionProfile bootstrap faerdig: %d timer - historiske buckets er nu straks brugbare",
                         entries,
                     )
             except Exception as exc:
                 _LOGGER.warning("Bootstrap fejl (ikke kritisk): %s", exc)
-                # Gem IKKE flag ved fejl — prøv igen næste genstart
+                # Gem IKKE flag ved fejl - prov igen n?ste genstart
 
         battery_cost = float(self._entry.data.get("battery_cost_per_kwh", 0.0))
         self._tracker = BatteryTracker(self.hass, self._entry.entry_id, battery_cost)
@@ -323,17 +322,48 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             )
         else:
             _LOGGER.warning(
-                "InverterController: ingen Deye-entiteter konfigureret — styring deaktiveret"
+                "InverterController: ingen Deye-entiteter konfigureret - styring deaktiveret"
             )
 
         self._register_event_listeners()
 
     async def async_persist_state(self) -> None:
         """Persist runtime state that should survive restarts."""
+        await self._profile.async_save(self.hass)
         if self._tracker is not None:
             await self._tracker.async_save()
         if self._forecast_tracker is not None:
             await self._forecast_tracker.async_save()
+
+    async def async_force_populate_load_model(self, days: int = 14) -> int:
+        """Force-populate the load model from recorder history."""
+        load_entity = self._entry.data.get("load_power_sensor", "")
+        if not load_entity:
+            raise ValueError("No load_power_sensor configured")
+
+        days = max(1, min(int(days), 14))
+        entries = await self._profile.bootstrap_from_history(
+            self.hass,
+            load_entity,
+            days=days,
+            force=True,
+        )
+        if entries > 0:
+            new_data = {**self._entry.data, "bootstrap_done": True}
+            self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+            if self.data is not None:
+                self.data.profile_confidence = self._profile.confidence
+                self.data.profile_days_collected = self._profile.days_collected
+                self.data.consumption_profile_chart = [
+                    self._profile.get_predicted_watt(hour, False) for hour in range(24)
+                ]
+            _LOGGER.info(
+                "ConsumptionProfile tvangspopuleret fra %d dages historik: %d buckets",
+                days,
+                entries,
+            )
+        return entries
+
 
     def _reset_pending_strategy(self) -> None:
         self._pending_strategy = None
