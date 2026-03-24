@@ -1,7 +1,7 @@
 {
   "domain": "solarfriend",
   "name": "SolarFriend",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "documentation": "https://github.com/SeekersDK/SolarFriend",
   "issue_tracker": "https://github.com/SeekersDK/SolarFriend/issues",
   "codeowners": ["@SeekersDK"],
