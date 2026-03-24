@@ -413,7 +413,7 @@ _EASEE_CHARGER_STATES = {
 }
 
 
-def _detect_easee_entities(
+async def _detect_easee_entities(
     hass: HomeAssistant,
 ) -> tuple[str | None, str | None, str | None]:
     """Return (status_entity, power_entity, charger_id) for an Easee charger."""
@@ -452,7 +452,7 @@ def _detect_easee_entities(
     return status_entity, power_entity, charger_id
 
 
-def _detect_kia_entities(
+async def _detect_kia_entities(
     hass: HomeAssistant,
 ) -> tuple[str | None, str | None, str | None, str | None]:
     """Return (soc_entity, plugged_in_entity, target_soc_entity, range_entity) for a Kia/Hyundai vehicle."""
@@ -508,7 +508,7 @@ def _detect_kia_entities(
         if entry.domain not in ("sensor", "number"):
             continue
         eid = entry.entity_id.lower()
-        if not any(kw in eid for kw in ("charge_limit", "target_soc", "charging_limit")):
+        if not any(kw in eid for kw in ("charge_limit", "target_soc", "charging_limit", "ev_charging_current")):
             continue
         if not any(brand in eid for brand in ("kia", "hyundai")):
             continue
@@ -985,7 +985,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if charger_type == "easee":
             detected_status, detected_power, detected_charger_id = (
-                await self.hass.async_add_executor_job(_detect_easee_entities, self.hass)
+                await _detect_easee_entities(self.hass)
             )
 
             def _status_key() -> vol.Required | vol.Optional:
@@ -1083,7 +1083,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if vehicle_type == "kia_hyundai":
             detected_soc, detected_plugged_in, detected_target_soc, detected_range = (
-                await self.hass.async_add_executor_job(_detect_kia_entities, self.hass)
+                await _detect_kia_entities(self.hass)
             )
         else:
             detected_soc, detected_plugged_in, detected_target_soc, detected_range = (
