@@ -5,7 +5,7 @@ import asyncio
 import logging
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
@@ -42,6 +42,13 @@ def _parse_dt(val) -> datetime:
     if isinstance(val, datetime):
         return val
     return datetime.fromisoformat(str(val))
+
+
+def _normalize_local_datetime(value: datetime) -> datetime:
+    """Return a timezone-aware local datetime for safe comparisons."""
+    if value.tzinfo is None:
+        return ha_dt.as_local(value.replace(tzinfo=timezone.utc))
+    return ha_dt.as_local(value)
 
 UPDATE_INTERVAL = timedelta(seconds=30)
 
@@ -346,6 +353,9 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         sunset: datetime,
     ) -> bool:
         """Allow immediate strategy switch on major regime changes or safety limits."""
+        now = _normalize_local_datetime(now)
+        sunset = _normalize_local_datetime(sunset)
+
         if desired_result.strategy == "ANTI_EXPORT":
             return True
 
@@ -574,8 +584,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 if not raw:
                     return None
                 try:
-                    dt = datetime.fromisoformat(str(raw))
-                    return dt.replace(tzinfo=None)  # make naive for comparison
+                    return _normalize_local_datetime(datetime.fromisoformat(str(raw)))
                 except (ValueError, TypeError):
                     return None
 
@@ -604,6 +613,10 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             sunset  = now.replace(hour=20, minute=0, second=0, microsecond=0)
 
         # ── Current state ─────────────────────────────────────────────────
+        now = _normalize_local_datetime(now)
+        sunrise = _normalize_local_datetime(sunrise)
+        sunset = _normalize_local_datetime(sunset)
+
         battery_soc = self.data.battery_soc
         if battery_soc is None:
             _LOGGER.debug("BatteryOptimizer: skipping — battery_soc not available yet")
@@ -1193,7 +1206,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 raw_sunset = sun_state.attributes.get("next_setting")
                 if raw_sunset:
                     try:
-                        sunset_dt = datetime.fromisoformat(str(raw_sunset))
+                        sunset_dt = _normalize_local_datetime(datetime.fromisoformat(str(raw_sunset)))
                         data.solar_until_sunset = get_forecast_for_period(
                             data.forecast_data.hourly_forecast, now, sunset_dt
                         )

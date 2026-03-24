@@ -562,9 +562,17 @@ class BatteryOptimizer:
 
         # TRIN 2 — Fremtidige slots (nu → midnat)
         future_slots = _get_future_slots(raw_prices, now.hour, 23, self._profile, is_weekend, now)
+        usable_capacity_kwh = (
+            self.battery_capacity_kwh * (self.battery_max_soc - self.battery_min_soc) / 100
+        )
+        battery_has_headroom = available_kwh < usable_capacity_kwh * 0.9
 
         # TRIN 3 — Billig netstrøm: hold batteriet tilbage og tag udsving fra nettet
-        if current_price is not None and current_price <= max(weighted_cost, LOW_GRID_HOLD_PRICE):
+        if (
+            current_price is not None
+            and current_price <= max(weighted_cost, LOW_GRID_HOLD_PRICE)
+            and battery_has_headroom
+        ):
             return OptimizeResult(
                 strategy="SAVE_SOLAR",
                 reason=(
@@ -635,16 +643,12 @@ class BatteryOptimizer:
             except (ValueError, IndexError):
                 continue
 
-        usable_capacity_kwh = (
-            self.battery_capacity_kwh * (self.battery_max_soc - self.battery_min_soc) / 100
-        )
-
         if today_future and current_price is not None:
             sorted_prices = sorted(today_future, key=lambda e: e["price"])
             cheap_threshold = sorted_prices[len(sorted_prices) // 4]["price"]
 
             low_solar = solar_remaining < self.battery_capacity_kwh * 0.3
-            not_full = available_kwh < usable_capacity_kwh * 0.9
+            not_full = battery_has_headroom
 
             if current_price <= cheap_threshold and low_solar and not_full:
                 return OptimizeResult(
