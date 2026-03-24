@@ -18,17 +18,8 @@ from homeassistant.util import dt as ha_dt
 from .const import DOMAIN
 from .consumption_profile import ConsumptionProfile
 from .battery_tracker import BatteryTracker
-from .battery_optimizer import (
-    BatteryOptimizer,
-    LOW_GRID_HOLD_PRICE,
-    OptimizeResult,
-    _calculate_cheapest_charge,
-    _find_best_discharge_hours,
-    _get_future_slots,
-)
+from .battery_optimizer import BatteryOptimizer, OptimizeResult
 from .forecast_adapter import ForecastAdapter, ForecastData, get_forecast_for_period
-from .forecast_tracker import ForecastTracker
-from .price_adapter import PriceAdapter, PriceData
 from .inverter_controller import InverterController
 from .ev_charger_controller import EVChargerController
 from .vehicle_controller import VehicleController
@@ -60,12 +51,6 @@ SOC_TRIGGER_DELTA = 5.0
 
 # Minimum interval between optimizer runs triggered by an event
 OPTIMIZE_MIN_INTERVAL = timedelta(minutes=5)
-STRATEGY_SOFT_COOLDOWN = timedelta(minutes=5)
-STRATEGY_CONFIRMATION_REQUIRED = 2
-PV_DROP_OVERRIDE_FRACTION = 0.40
-PV_DROP_OVERRIDE_MIN_W = 500.0
-SOC_OVERRIDE_MARGIN = 2.0
-SUNSET_OVERRIDE_REMAINING_KWH = 0.25
 
 # Battery power sign convention (Deye via ESPHome):
 #   battery_power > 0  → discharging (leverer strøm)
@@ -83,7 +68,6 @@ class SolarFriendData:
     load_power: float = 0.0
     price: float = 0.0
     forecast: float = 0.0
-    price_data: PriceData | None = None
 
     # Derived values
     solar_surplus: float = 0.0
@@ -127,22 +111,6 @@ class SolarFriendData:
 
     # Forecast SOC curve (24 values in %, None for past hours)
     forecast_soc_chart: list = field(default_factory=list)
-    battery_plan: list[dict[str, Any]] = field(default_factory=list)
-    forecast_actual_today_so_far_kwh: float = 0.0
-    forecast_predicted_today_so_far_kwh: float = 0.0
-    forecast_error_today_so_far_kwh: float = 0.0
-    forecast_accuracy_today_so_far_pct: float = 0.0
-    forecast_actual_yesterday_kwh: float = 0.0
-    forecast_predicted_yesterday_kwh: float = 0.0
-    forecast_error_yesterday_kwh: float = 0.0
-    forecast_accuracy_yesterday_pct: float = 0.0
-    forecast_bias_factor_14d: float = 1.0
-    forecast_mae_14d_kwh: float = 0.0
-    forecast_mape_14d_pct: float = 0.0
-    forecast_accuracy_14d_pct: float = 0.0
-    forecast_valid_days_14d: int = 0
-    forecast_correction_valid: bool = False
-    forecast_history_14d: list[dict[str, Any]] = field(default_factory=list)
 
     # Which sensors were unavailable this cycle
     unavailable: list[str] = field(default_factory=list)
@@ -207,7 +175,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         # BatteryTracker — initialised in async_startup
         self._tracker: BatteryTracker | None = None
-        self._forecast_tracker: ForecastTracker | None = None
 
         # BatteryOptimizer — instantiated in async_startup after tracker is ready
         self._optimizer: BatteryOptimizer | None = None
@@ -219,16 +186,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._prev_battery_power: float = 0.0
         self._prev_update_time: datetime | None = None
         self._last_tracker_save: datetime | None = None
-        self._last_forecast_tracker_save: datetime | None = None
         self._last_soc_correction: datetime | None = None
 
         # Optimizer state
         self._last_optimize_dt: datetime | None = None
         self._last_optimize_soc: float | None = None
-        self._active_strategy_since: datetime | None = None
-        self._active_strategy_reference_pv: float = 0.0
-        self._pending_strategy: str | None = None
-        self._pending_strategy_count: int = 0
 
         # Battery sign convention check (runs once)
         self._battery_sign_warned: bool = False
@@ -297,8 +259,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         battery_cost = float(self._entry.data.get("battery_cost_per_kwh", 0.0))
         self._tracker = BatteryTracker(self.hass, self._entry.entry_id, battery_cost)
         await self._tracker.async_load()
-        self._forecast_tracker = ForecastTracker(self.hass, self._entry.entry_id)
-        await self._forecast_tracker.async_load()
 
         self._optimizer = BatteryOptimizer(
             config_entry=self._entry,
@@ -318,112 +278,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             )
 
         self._register_event_listeners()
-
-    async def async_persist_state(self) -> None:
-        """Persist runtime state that should survive restarts."""
-        if self._tracker is not None:
-            await self._tracker.async_save()
-        if self._forecast_tracker is not None:
-            await self._forecast_tracker.async_save()
-
-    def _reset_pending_strategy(self) -> None:
-        self._pending_strategy = None
-        self._pending_strategy_count = 0
-
-    def _mark_strategy_applied(self, result: OptimizeResult, now: datetime, pv_power: float) -> None:
-        self._active_strategy_since = now
-        self._active_strategy_reference_pv = max(0.0, pv_power)
-        self._reset_pending_strategy()
-
-    def _strategy_override_allowed(
-        self,
-        active_result: OptimizeResult,
-        desired_result: OptimizeResult,
-        *,
-        now: datetime,
-        current_soc: float,
-        pv_power: float,
-        sunset: datetime,
-    ) -> bool:
-        """Allow immediate strategy switch on major regime changes or safety limits."""
-        if desired_result.strategy == "ANTI_EXPORT":
-            return True
-
-        cfg = self._entry.data
-        min_soc = float(cfg.get("battery_min_soc", 10.0))
-        max_soc = float(cfg.get("battery_max_soc", 100.0))
-        if current_soc <= (min_soc + SOC_OVERRIDE_MARGIN):
-            return True
-        if current_soc >= (max_soc - SOC_OVERRIDE_MARGIN):
-            return True
-
-        if desired_result.strategy == active_result.strategy:
-            return True
-
-        if now >= sunset:
-            return True
-
-        solar_remaining = self.data.solar_until_sunset if self.data else 0.0
-        if desired_result.strategy == "SAVE_SOLAR" and solar_remaining <= SUNSET_OVERRIDE_REMAINING_KWH:
-            return True
-
-        reference_pv = max(0.0, self._active_strategy_reference_pv)
-        pv_drop_w = max(0.0, reference_pv - max(0.0, pv_power))
-        if reference_pv > 0:
-            pv_drop_fraction = pv_drop_w / reference_pv
-            if (
-                pv_drop_w >= PV_DROP_OVERRIDE_MIN_W
-                and pv_drop_fraction >= PV_DROP_OVERRIDE_FRACTION
-            ):
-                return True
-
-        return False
-
-    def _select_strategy_result(
-        self,
-        desired_result: OptimizeResult,
-        *,
-        now: datetime,
-        current_soc: float,
-        pv_power: float,
-        sunset: datetime,
-    ) -> tuple[OptimizeResult, bool]:
-        """Apply hysteresis/hold logic and return (result_to_apply, strategy_changed)."""
-        active_result = self.data.optimize_result if self.data else None
-        if active_result is None:
-            self._mark_strategy_applied(desired_result, now, pv_power)
-            return desired_result, True
-
-        if desired_result.strategy == active_result.strategy:
-            self._reset_pending_strategy()
-            return desired_result, False
-
-        if self._strategy_override_allowed(
-            active_result,
-            desired_result,
-            now=now,
-            current_soc=current_soc,
-            pv_power=pv_power,
-            sunset=sunset,
-        ):
-            self._mark_strategy_applied(desired_result, now, pv_power)
-            return desired_result, True
-
-        if self._pending_strategy == desired_result.strategy:
-            self._pending_strategy_count += 1
-        else:
-            self._pending_strategy = desired_result.strategy
-            self._pending_strategy_count = 1
-
-        hold_elapsed = (
-            self._active_strategy_since is None
-            or (now - self._active_strategy_since) >= STRATEGY_SOFT_COOLDOWN
-        )
-        if hold_elapsed and self._pending_strategy_count >= STRATEGY_CONFIRMATION_REQUIRED:
-            self._mark_strategy_applied(desired_result, now, pv_power)
-            return desired_result, True
-
-        return active_result, False
 
     # ------------------------------------------------------------------
     # Event listeners
@@ -542,7 +396,22 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         cfg = self._entry.data
 
         # ── Raw prices from Energi Data Service / Nordpool sensor ──────────
-        raw_prices = self.data.price_data.to_legacy_raw_prices() if self.data.price_data else []
+        raw_prices: list[dict[str, Any]] = []
+        price_sensor_id = cfg.get("price_sensor", "")
+        if price_sensor_id:
+            price_state = self.hass.states.get(price_sensor_id)
+            if price_state is not None:
+                raw_today: list = price_state.attributes.get("raw_today", []) or []
+                raw_tomorrow: list = price_state.attributes.get("raw_tomorrow", []) or []
+                raw_prices = raw_today + raw_tomorrow
+
+                # Fallback: some sensors expose prices under other keys
+                if not raw_prices:
+                    for attr_key in ("today", "prices"):
+                        prices_attr = price_state.attributes.get(attr_key)
+                        if isinstance(prices_attr, list) and prices_attr:
+                            raw_prices = prices_attr
+                            break
 
         # Fallback to night-price history when sensor has no attribute list
         if not raw_prices:
@@ -551,7 +420,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 raw_prices.append({"hour": now.hour, "price": self.data.price})
 
         # ── Forecast ───────────────────────────────────────────────────────
-        forecast_data = self.data.forecast_data
+        forecast_data = await ForecastAdapter.from_hass(
+            hass=self.hass,
+            forecast_type=cfg.get("forecast_type", "forecast_solar"),
+            forecast_sensor_entity=cfg.get("forecast_sensor"),
+        )
 
         if forecast_data is None:
             _LOGGER.warning("BatteryOptimizer: forecast data not available — using zeros")
@@ -640,44 +513,34 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             hourly_forecast=hourly_forecast,
         )
 
-        selected_result, strategy_changed = self._select_strategy_result(
-            result,
-            now=now,
-            current_soc=current_soc,
-            pv_power=pv_power,
-            sunset=sunset,
-        )
-
         self._last_optimize_dt = now
         self._last_optimize_soc = current_soc
 
-        self.data.optimize_result = selected_result
+        self.data.optimize_result = result
 
-        if selected_result.strategy == "ANTI_EXPORT":
+        if result.strategy == "ANTI_EXPORT":
             _LOGGER.warning(
                 "Negativ/nul spotpris %.4f kr/kWh — solar sell deaktiveret",
                 self.data.price,
             )
 
         if self._inverter is not None and self._inverter.is_configured:
-            await self._inverter.apply(selected_result)
+            await self._inverter.apply(result)
 
         if notify:
             self.async_set_updated_data(self.data)
 
         _LOGGER.info(
-            "BatteryOptimizer [%s] desired=%s applied=%s changed=%s reason=%s saving=%.2f kr "
+            "BatteryOptimizer [%s] strategy=%s reason=%s saving=%.2f kr "
             "morning_need=%.1f kWh night_charge=%.1f kWh target_soc=%s "
             "solar_next2h=%.1f kWh solar_remaining=%.1f kWh",
             reason,
             result.strategy,
-            selected_result.strategy,
-            "yes" if strategy_changed else "no",
-            selected_result.reason,
-            selected_result.expected_saving_dkk,
-            selected_result.morning_need_kwh,
-            selected_result.night_charge_kwh,
-            f"{selected_result.target_soc:.0f}%" if selected_result.target_soc else "N/A",
+            result.reason,
+            result.expected_saving_dkk,
+            result.morning_need_kwh,
+            result.night_charge_kwh,
+            f"{result.target_soc:.0f}%" if result.target_soc else "N/A",
             self.data.solar_next_2h if self.data else 0.0,
             self.data.solar_until_sunset if self.data else 0.0,
         )
@@ -695,188 +558,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             return float(state.state), True
         except (ValueError, TypeError):
             return None, False
-
-    def _get_raw_prices(self) -> list[dict[str, Any]]:
-        """Return the normalised price list from the current data snapshot."""
-        if self.data and self.data.price_data is not None:
-            return self.data.price_data.to_legacy_raw_prices()
-        return []
-
-    def _forecast_kwh_between(self, from_dt: datetime, to_dt: datetime) -> float:
-        """Return forecast kWh in a time window from the current snapshot."""
-        if self.data is None or self.data.forecast_data is None:
-            return 0.0
-        return get_forecast_for_period(self.data.forecast_data.hourly_forecast, from_dt, to_dt)
-
-    async def _update_forecast_tracker(
-        self,
-        *,
-        now: datetime,
-        pv_power: float,
-        forecast_total_today_kwh: float | None,
-    ) -> None:
-        """Track actual PV generation and forecast quality over time."""
-        if self._forecast_tracker is None:
-            return
-
-        if self._prev_update_time is None:
-            dt_seconds = 0.0
-        else:
-            dt_seconds = (now - self._prev_update_time).total_seconds()
-
-        self._forecast_tracker.update(
-            now=now,
-            pv_power_w=pv_power,
-            dt_seconds=dt_seconds,
-            forecast_total_today_kwh=forecast_total_today_kwh,
-        )
-
-        if (
-            self._last_forecast_tracker_save is None
-            or (now - self._last_forecast_tracker_save) >= timedelta(minutes=15)
-        ):
-            await self._forecast_tracker.async_save()
-            self._last_forecast_tracker_save = now
-
-    def _build_battery_plan(self, data: SolarFriendData, now: datetime) -> list[dict[str, Any]]:
-        """Build a battery plan preview for the rest of the day."""
-        result = data.optimize_result
-        if result is None:
-            return []
-
-        cfg = self._entry.data
-        capacity_kwh = max(0.1, float(cfg.get("battery_capacity_kwh", 10.0)))
-        min_soc = float(cfg.get("battery_min_soc", 10.0))
-        max_soc = float(cfg.get("battery_max_soc", 100.0))
-        charge_rate_kw = max(0.1, float(cfg.get("charge_rate_kw", 6.0)))
-        max_delta_kwh = charge_rate_kw
-        is_weekend = now.weekday() >= 5
-
-        solar_by_hour_kwh: dict[int, float] = {}
-        if data.forecast_data and data.forecast_data.hourly_forecast:
-            for slot in data.forecast_data.hourly_forecast:
-                solar_by_hour_kwh[slot["period_start"].hour] = (
-                    solar_by_hour_kwh.get(slot["period_start"].hour, 0.0)
-                    + float(slot.get("pv_estimate_kwh", 0.0))
-                )
-
-        raw_prices = data.price_data.to_legacy_raw_prices() if data.price_data else []
-        price_by_hour: dict[int, float] = {}
-        for entry in raw_prices:
-            raw_price = entry.get("price") if entry.get("price") is not None else entry.get("value")
-            raw_start = entry.get("start") if entry.get("start") is not None else entry.get("hour")
-            if raw_price is None or raw_start is None:
-                continue
-            try:
-                dt = raw_start if isinstance(raw_start, datetime) else datetime.fromisoformat(str(raw_start))
-                local_dt = ha_dt.as_local(dt) if dt.tzinfo else ha_dt.as_local(dt.replace(tzinfo=ha_dt.UTC))
-                price_by_hour[local_dt.hour] = float(raw_price)
-            except (TypeError, ValueError):
-                continue
-
-        planned_charge_hours: set[str] = set()
-        if result.strategy == "CHARGE_NIGHT" and result.night_charge_kwh > 0 and raw_prices:
-            night_slots = _get_future_slots(raw_prices, now.hour, 6, self._profile, is_weekend, now)
-            charge_plan = _calculate_cheapest_charge(
-                result.night_charge_kwh,
-                night_slots,
-                charge_rate_kw,
-                data.battery_cost_per_kwh,
-            )
-            planned_charge_hours = {slot["hour_str"] for slot in charge_plan["charge_slots"]}
-        elif result.strategy == "CHARGE_GRID":
-            planned_charge_hours = {now.strftime("%H:00")}
-
-        available_kwh = max(0.0, (data.battery_soc - min_soc) / 100.0 * capacity_kwh)
-        discharge_plan = []
-        if raw_prices and available_kwh > 0:
-            discharge_plan = _find_best_discharge_hours(
-                _get_future_slots(raw_prices, now.hour, 23, self._profile, is_weekend, now),
-                available_kwh,
-                data.battery_weighted_cost,
-                float(cfg.get("min_charge_saving", 0.10)),
-            )
-            discharge_plan = [
-                slot
-                for slot in discharge_plan
-                if float(slot.get("price", 0.0)) > max(data.battery_weighted_cost, LOW_GRID_HOLD_PRICE)
-            ]
-        discharge_plan_by_hour = {
-            slot["hour_str"]: float(slot.get("allocated_kwh", 0.0))
-            for slot in discharge_plan
-        }
-        planned_discharge_hours = set(discharge_plan_by_hour)
-        planned_discharge_hours.update(result.best_discharge_hours)
-        if result.strategy == "SELL_BATTERY":
-            planned_discharge_hours.add(now.strftime("%H:00"))
-
-        soc = data.battery_soc
-        plan: list[dict[str, Any]] = []
-        for hour in range(now.hour, 24):
-            hour_dt = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            solar_kwh = solar_by_hour_kwh.get(hour, 0.0)
-            load_w = (
-                data.consumption_profile_chart[hour]
-                if data.consumption_profile_chart
-                else 850.0
-            )
-            load_kwh = load_w / 1000.0
-            price = price_by_hour.get(hour, data.price)
-
-            solar_charge_kwh = 0.0
-            grid_charge_kwh = 0.0
-            discharge_kwh = 0.0
-            grid_import_kwh = 0.0
-
-            net_solar_kwh = solar_kwh - load_kwh
-            charge_room_kwh = max(0.0, (max_soc - soc) / 100.0 * capacity_kwh)
-            discharge_room_kwh = max(0.0, (soc - min_soc) / 100.0 * capacity_kwh)
-
-            if net_solar_kwh > 0:
-                solar_charge_kwh = min(net_solar_kwh, max_delta_kwh, charge_room_kwh)
-                charge_room_kwh -= solar_charge_kwh
-            else:
-                deficit_kwh = abs(net_solar_kwh)
-                if f"{hour:02d}:00" in planned_discharge_hours:
-                    discharge_budget_kwh = discharge_plan_by_hour.get(
-                        f"{hour:02d}:00",
-                        max_delta_kwh,
-                    )
-                    discharge_kwh = min(
-                        deficit_kwh,
-                        discharge_room_kwh,
-                        max_delta_kwh,
-                        discharge_budget_kwh,
-                    )
-                    discharge_plan_by_hour[f"{hour:02d}:00"] = max(
-                        0.0,
-                        discharge_budget_kwh - discharge_kwh,
-                    )
-                    deficit_kwh -= discharge_kwh
-                grid_import_kwh += max(0.0, deficit_kwh)
-
-            if f"{hour:02d}:00" in planned_charge_hours and charge_room_kwh > 0:
-                grid_charge_kwh = min(max_delta_kwh - solar_charge_kwh, charge_room_kwh)
-                grid_import_kwh += max(0.0, grid_charge_kwh)
-
-            delta_soc = ((solar_charge_kwh + grid_charge_kwh - discharge_kwh) / capacity_kwh) * 100.0
-            soc = max(min_soc, min(max_soc, soc + delta_soc))
-
-            plan.append(
-                {
-                    "hour": hour_dt.isoformat(),
-                    "soc": round(soc, 1),
-                    "solar_charge_w": round(solar_charge_kwh * 1000),
-                    "grid_charge_w": round(grid_charge_kwh * 1000),
-                    "discharge_w": round(discharge_kwh * 1000),
-                    "grid_import_w": round(grid_import_kwh * 1000),
-                    "price_dkk": round(price, 4),
-                    "forecast_solar_w": round(solar_kwh * 1000),
-                    "forecast_load_w": round(load_w),
-                }
-            )
-
-        return plan
 
     def _update_price_history(self, price: float) -> None:
         self._price_history.append(price)
@@ -1017,6 +698,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             "battery_soc":   cfg.get("battery_soc_sensor", ""),
             "battery_power": cfg.get("battery_power_sensor", ""),
             "load_power":    cfg.get("load_power_sensor", ""),
+            "price":         cfg.get("price_sensor", ""),
+            "forecast":      cfg.get("forecast_sensor", ""),
         }
 
         readings: dict[str, float] = {}
@@ -1033,26 +716,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 unavailable.append(field_name)
                 _LOGGER.debug("Sensor unavailable: %s (%s)", field_name, entity_id)
 
-        now = ha_dt.now()
-
-        price_snapshot = PriceAdapter.from_hass(self.hass, cfg.get("price_sensor"))
-        if price_snapshot is None or price_snapshot.current_price is None:
-            unavailable.append("price")
-        else:
-            data.price_data = price_snapshot
-            data.price = price_snapshot.current_price
-
-        forecast_snapshot = await ForecastAdapter.from_hass(
-            hass=self.hass,
-            forecast_type=cfg.get("forecast_type", "forecast_solar"),
-            forecast_sensor_entity=cfg.get("forecast_sensor"),
-        )
-        if forecast_snapshot is None:
-            unavailable.append("forecast")
-        else:
-            data.forecast_data = forecast_snapshot
-            data.forecast = forecast_snapshot.total_today_kwh
-
         if unavailable:
             data.unavailable = unavailable
 
@@ -1062,12 +725,15 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         data.battery_soc   = readings.get("battery_soc", 0.0)
         data.battery_power = readings.get("battery_power", 0.0)
         data.load_power    = readings.get("load_power", 0.0)
+        data.price         = readings.get("price", 0.0)
+        data.forecast      = readings.get("forecast", 0.0)
 
         # Derived: surplus
         data.solar_surplus = data.pv_power - data.load_power
 
         # Rolling price history and night price tracking
-        if data.price_data is not None and data.price_data.current_price is not None:
+        now = ha_dt.now()
+        if "price" in readings:
             self._update_price_history(data.price)
             self._record_night_price(now.hour, data.price)
 
@@ -1082,6 +748,15 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             data.charge_threshold = round(min_night + data.battery_cost_per_kwh, 4)
 
         # Update consumption profile every 15 minutes
+        if "load_power" in readings:
+            await self._maybe_update_profile(
+                data.load_power,
+                ev_power_w=data.ev_charging_power,
+                battery_power_w=data.battery_power,
+            )
+
+        data.profile_confidence = self._profile.confidence
+        data.profile_days_collected = self._profile.days_collected
 
         # ── BatteryTracker update ─────────────────────────────────────────
         have_tracker_inputs = (
@@ -1099,15 +774,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 current_price=data.price,
             )
 
-        if "pv_power" in readings or "pv2_power" in readings:
-            await self._update_forecast_tracker(
-                now=now,
-                pv_power=data.pv_power,
-                forecast_total_today_kwh=(
-                    data.forecast_data.total_today_kwh if data.forecast_data else None
-                ),
-            )
-
         self._prev_battery_power = data.battery_power
         self._prev_update_time = now
 
@@ -1122,24 +788,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             data.today_optimizer_saved_dkk = self._tracker.today_optimizer_saved_dkk
             data.total_solar_direct_saved_dkk = self._tracker.total_solar_direct_saved_dkk
             data.total_optimizer_saved_dkk = self._tracker.total_optimizer_saved_dkk
-
-        if self._forecast_tracker is not None:
-            metrics = self._forecast_tracker.build_metrics(now, data.forecast_data)
-            data.forecast_actual_today_so_far_kwh = metrics.today_actual_kwh
-            data.forecast_predicted_today_so_far_kwh = metrics.today_predicted_kwh
-            data.forecast_error_today_so_far_kwh = metrics.today_error_kwh
-            data.forecast_accuracy_today_so_far_pct = metrics.today_accuracy_pct
-            data.forecast_actual_yesterday_kwh = metrics.yesterday_actual_kwh
-            data.forecast_predicted_yesterday_kwh = metrics.yesterday_predicted_kwh
-            data.forecast_error_yesterday_kwh = metrics.yesterday_error_kwh
-            data.forecast_accuracy_yesterday_pct = metrics.yesterday_accuracy_pct
-            data.forecast_bias_factor_14d = metrics.bias_factor_14d
-            data.forecast_mae_14d_kwh = metrics.mae_14d_kwh
-            data.forecast_mape_14d_pct = metrics.mape_14d_pct
-            data.forecast_accuracy_14d_pct = metrics.accuracy_14d_pct
-            data.forecast_valid_days_14d = metrics.valid_days_14d
-            data.forecast_correction_valid = metrics.correction_valid
-            data.forecast_history_14d = metrics.history_14d
 
         # ── Consumption profile chart (24h curve) ────────────────────────────
         is_weekend = now.weekday() >= 5
@@ -1183,22 +831,30 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         data.forecast_soc_chart = forecast_soc
 
-        # ── Solar-derived sensors (next 2h + until sunset) ───────────────
-        if data.forecast_data is not None and data.forecast_data.hourly_forecast:
-            data.solar_next_2h = get_forecast_for_period(
-                data.forecast_data.hourly_forecast, now, now + timedelta(hours=2)
-            )
-            sun_state = self.hass.states.get("sun.sun")
-            if sun_state is not None:
-                raw_sunset = sun_state.attributes.get("next_setting")
-                if raw_sunset:
-                    try:
-                        sunset_dt = datetime.fromisoformat(str(raw_sunset))
-                        data.solar_until_sunset = get_forecast_for_period(
-                            data.forecast_data.hourly_forecast, now, sunset_dt
-                        )
-                    except (ValueError, TypeError):
-                        pass
+        # ── Forecast data (refreshed every poll cycle) ───────────────────
+        fresh_forecast = await ForecastAdapter.from_hass(
+            hass=self.hass,
+            forecast_type=cfg.get("forecast_type", "forecast_solar"),
+            forecast_sensor_entity=cfg.get("forecast_sensor"),
+        )
+        if fresh_forecast is not None:
+            data.forecast_data = fresh_forecast
+
+            if fresh_forecast.hourly_forecast:
+                data.solar_next_2h = get_forecast_for_period(
+                    fresh_forecast.hourly_forecast, now, now + timedelta(hours=2)
+                )
+                sun_state = self.hass.states.get("sun.sun")
+                if sun_state is not None:
+                    raw_sunset = sun_state.attributes.get("next_setting")
+                    if raw_sunset:
+                        try:
+                            sunset_dt = datetime.fromisoformat(str(raw_sunset))
+                            data.solar_until_sunset = get_forecast_for_period(
+                                fresh_forecast.hourly_forecast, now, sunset_dt
+                            )
+                        except (ValueError, TypeError):
+                            pass
 
         # ── Hourly optimizer fallback ─────────────────────────────────────
         should_run_hourly = (
@@ -1212,22 +868,10 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             # Pull back whatever the optimizer wrote
             data.optimize_result = self.data.optimize_result if self.data else data.optimize_result
 
-        data.battery_plan = self._build_battery_plan(data, now)
-
         # ── EV charging ───────────────────────────────────────────────────
         if self._ev_enabled:
             self.data = data  # type: ignore[assignment]
             await self._update_ev()
-
-        if "load_power" in readings:
-            await self._maybe_update_profile(
-                data.load_power,
-                ev_power_w=data.ev_charging_power,
-                battery_power_w=data.battery_power,
-            )
-
-        data.profile_confidence = self._profile.confidence
-        data.profile_days_collected = self._profile.days_collected
 
         _LOGGER.debug(
             "Update: PV=%.0fW load=%.0fW battery=%.0fW SOC=%.1f%% "
@@ -1239,6 +883,26 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         )
 
         return data
+
+    def _get_raw_prices(self) -> list[dict]:
+        """Read raw price list from the configured price sensor."""
+        cfg = self._entry.data
+        price_sensor_id = cfg.get("price_sensor", "")
+        if not price_sensor_id:
+            return []
+        price_state = self.hass.states.get(price_sensor_id)
+        if price_state is None:
+            return []
+        raw_today: list = price_state.attributes.get("raw_today", []) or []
+        raw_tomorrow: list = price_state.attributes.get("raw_tomorrow", []) or []
+        raw_prices = raw_today + raw_tomorrow
+        if not raw_prices:
+            for attr_key in ("today", "prices"):
+                candidate = price_state.attributes.get(attr_key)
+                if isinstance(candidate, list) and candidate:
+                    raw_prices = candidate
+                    break
+        return raw_prices
 
     async def _update_ev(self) -> None:
         """Run EV optimizer and act on the result."""
@@ -1277,11 +941,38 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             # because forecast_today only covers until midnight.
             # Normalize every timestamp to local time before comparing, matching
             # the same approach used in _compute_ev_plan.
-            solar_to_departure = self._forecast_kwh_between(_now, _departure)
+            solar_to_departure = 0.0
+            _today_state    = self.hass.states.get("sensor.solcast_pv_forecast_forecast_today")
+            _tomorrow_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_tomorrow")
             _LOGGER.debug(
-                "EV solar forecast til afgang %s: %.2f kWh",
-                _departure.strftime("%H:%M"),
-                solar_to_departure,
+                "Solcast tomorrow state: %s, attributes keys: %s",
+                _tomorrow_state.state if _tomorrow_state else "None",
+                list(_tomorrow_state.attributes.keys())[:10] if _tomorrow_state else [],
+            )
+            if _tomorrow_state:
+                _t_hourly = _tomorrow_state.attributes.get("detailedHourly", [])
+                _LOGGER.debug("Tomorrow detailedHourly entries: %d", len(_t_hourly))
+                if _t_hourly:
+                    _LOGGER.debug("Tomorrow first entry: %s", _t_hourly[0])
+            for _state in (_today_state, _tomorrow_state):
+                if not _state:
+                    continue
+                for _entry in _state.attributes.get("detailedHourly", []):
+                    try:
+                        _dt_raw = _parse_dt(_entry["period_start"])
+                        _dt_local = ha_dt.as_local(_dt_raw) if _dt_raw.tzinfo else ha_dt.as_local(
+                            _dt_raw.replace(tzinfo=ha_dt.UTC)
+                        )
+                        if _now <= _dt_local < _departure:
+                            solar_to_departure += float(_entry.get("pv_estimate", 0))
+                    except (KeyError, ValueError, TypeError):
+                        pass
+            _LOGGER.debug(
+                "EV solar forecast til afgang %s: %.2f kWh "
+                "(today entries: %d, tomorrow entries: %d)",
+                _departure.strftime("%H:%M"), solar_to_departure,
+                len(_today_state.attributes.get("detailedHourly", [])) if _today_state else 0,
+                len(_tomorrow_state.attributes.get("detailedHourly", [])) if _tomorrow_state else 0,
             )
 
             # Expected SOC at this moment from previous plan — used for behind-schedule check
@@ -1498,13 +1189,27 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         # ── Solar forecast to departure (for hybrid grid-hour reduction) ──
         # Read directly from both Solcast sensors (same logic as _update_ev) so
         # the plan and optimizer always use the same solar estimate.
-        solar_to_departure_kwh = self._forecast_kwh_between(now, departure)
+        solar_to_departure_kwh = 0.0
+        _plan_today_state    = self.hass.states.get("sensor.solcast_pv_forecast_forecast_today")
+        _plan_tomorrow_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_tomorrow")
+        for _plan_state in (_plan_today_state, _plan_tomorrow_state):
+            if not _plan_state:
+                continue
+            for _plan_entry in _plan_state.attributes.get("detailedHourly", []):
+                try:
+                    _pdt_raw = _parse_dt(_plan_entry["period_start"])
+                    _pdt_local = ha_dt.as_local(_pdt_raw) if _pdt_raw.tzinfo else ha_dt.as_local(
+                        _pdt_raw.replace(tzinfo=ha_dt.UTC)
+                    )
+                    if now <= _pdt_local < departure:
+                        solar_to_departure_kwh += float(_plan_entry.get("pv_estimate", 0))
+                except (KeyError, ValueError, TypeError):
+                    pass
 
         # ── Determine cheap slots for hybrid / grid_schedule ─────────────
         cheap_slot_set: set[int] = set()  # indices into slot_dts
-        total_needed_kwh = max(0.0, (target_soc - current_soc) / 100.0 * capacity_kwh)
-        grid_needed_kwh = 0.0
         if mode in ("hybrid", "grid_schedule"):
+            total_needed_kwh = max(0.0, (target_soc - current_soc) / 100.0 * capacity_kwh)
             # hybrid: solar covers part of the need — only schedule grid for the remainder
             if mode == "hybrid":
                 grid_needed_kwh = max(0.0, total_needed_kwh - solar_to_departure_kwh)
@@ -1534,7 +1239,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         # ── Build plan hour by hour ───────────────────────────────────────
         plan: list[dict] = []
         soc = current_soc
-        remaining_grid_kwh = grid_needed_kwh
 
         for i, hour_dt in enumerate(slot_dts):
             hour = hour_dt.hour
@@ -1546,43 +1250,22 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             )
             surplus_w = max(0.0, solar_w - load_w)
 
-            remaining_kwh = max(0.0, (target_soc - soc) / 100.0 * capacity_kwh)
-            remaining_hours = max(0.1, (departure - hour_dt).total_seconds() / 3600.0)
-            max_useful_w = min(
-                max_charge_w,
-                (remaining_kwh / remaining_hours) * 1000.0 if remaining_kwh > 0 else 0.0,
-            )
-
-            solar_contribution = 0.0
-            grid_contribution = 0.0
-            if soc < target_soc and max_useful_w > 0:
+            charge_w = 0.0
+            if soc < target_soc:
                 if mode == "solar_only":
                     # Only solar surplus — respect minimum threshold
                     if surplus_w >= _MIN_SURPLUS_W:
-                        solar_contribution = min(surplus_w, max_useful_w)
+                        charge_w = min(surplus_w, max_charge_w)
                 elif mode in ("hybrid", "grid_schedule"):
                     if i in cheap_slot_set:
-                        solar_contribution = min(surplus_w, max_useful_w, max_charge_w)
-                        cheap_slots_left = sum(1 for idx in cheap_slot_set if idx >= i)
-                        grid_budget_w = (
-                            (remaining_grid_kwh / max(1, cheap_slots_left)) * 1000.0
-                            if remaining_grid_kwh > 0
-                            else 0.0
-                        )
-                        grid_contribution = min(
-                            grid_budget_w,
-                            max(0.0, max_charge_w - solar_contribution),
-                            max(0.0, max_useful_w - solar_contribution),
-                        )
-                        remaining_grid_kwh = max(
-                            0.0,
-                            remaining_grid_kwh - (grid_contribution / 1000.0),
-                        )
+                        # Cheap slot: charge at full rate; solar covers what it can
+                        charge_w = max_charge_w
                     elif surplus_w >= _MIN_SURPLUS_W:
                         # Outside cheap slot: opportunistic solar only
-                        solar_contribution = min(surplus_w, max_useful_w, max_charge_w)
+                        charge_w = min(surplus_w, max_charge_w)
 
-            charge_w = solar_contribution + grid_contribution
+            solar_contribution = min(charge_w, surplus_w)
+            grid_contribution = max(0.0, charge_w - solar_contribution)
 
             soc_gain = (charge_w / 1000.0) / capacity_kwh * 100.0
             soc = min(target_soc, soc + soc_gain)

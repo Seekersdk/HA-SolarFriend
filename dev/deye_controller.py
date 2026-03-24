@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .inverter_controller import InverterController
@@ -13,17 +12,6 @@ if TYPE_CHECKING:
     from .battery_optimizer import OptimizeResult
 
 _LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class _CommandSignature:
-    """Minimal signature of the desired inverter command state."""
-
-    strategy: str
-    solar_sell: bool
-    cheapest_charge_hour: str | None
-    target_soc: float | None
-    charge_now: bool
 
 
 class DeyeController(InverterController):
@@ -42,34 +30,21 @@ class DeyeController(InverterController):
         self._energy_priority = data.get("deye_energy_priority")
         self._solar_sell      = data.get("solar_sell_entity", "")
 
-        self._last_signature: _CommandSignature | None = None
+        self._last_strategy: str | None = None
 
     @property
     def is_configured(self) -> bool:
         """True if at least grid_charge and energy_priority are configured."""
         return bool(self._grid_charge and self._energy_priority)
 
-    @staticmethod
-    def _signature_for(result: OptimizeResult) -> _CommandSignature:
-        return _CommandSignature(
-            strategy=result.strategy,
-            solar_sell=result.solar_sell,
-            cheapest_charge_hour=result.cheapest_charge_hour,
-            target_soc=result.target_soc,
-            charge_now=result.charge_now,
-        )
-
     async def apply(self, result: OptimizeResult) -> None:
-        """Apply strategy to Deye — skips only when desired command state is unchanged."""
-        signature = self._signature_for(result)
-        if signature == self._last_signature:
+        """Apply strategy to Deye — skips if strategy unchanged since last call."""
+        if result.strategy == self._last_strategy:
             return
 
         _LOGGER.info(
             "DeyeController [%s → %s]: %s",
-            self._last_signature.strategy if self._last_signature else None,
-            result.strategy,
-            result.reason,
+            self._last_strategy, result.strategy, result.reason,
         )
 
         if result.strategy == "ANTI_EXPORT":
@@ -86,7 +61,7 @@ class DeyeController(InverterController):
             await self._apply_sell_battery()
         elif result.strategy == "SAVE_SOLAR":
             await self._set_solar_sell(True)
-            await self._apply_idle()
+            await self._apply_save_solar()
         elif result.strategy == "CHARGE_GRID":
             await self._set_solar_sell(True)
             await self._apply_charge_grid(result)
@@ -94,7 +69,7 @@ class DeyeController(InverterController):
             await self._set_solar_sell(True)
             await self._apply_idle()
 
-        self._last_signature = signature
+        self._last_strategy = result.strategy
 
     # ------------------------------------------------------------------
     # Strategy implementations
@@ -141,6 +116,12 @@ class DeyeController(InverterController):
         _LOGGER.info(
             "DeyeController: SELL_BATTERY — Grid first aktiveret, batteri aflader til net"
         )
+
+    async def _apply_save_solar(self) -> None:
+        """Let solar cover house load first; surplus charges battery automatically."""
+        await self._set_select(self._energy_priority, "Load first")
+        await self._set_switch(self._grid_charge, False)
+        await self._set_switch(self._time_of_use, False)
 
     async def _apply_charge_grid(self, result: OptimizeResult) -> None:
         """Charge now — price is at floor (no time-of-use scheduling needed)."""

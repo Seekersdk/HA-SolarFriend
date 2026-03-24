@@ -62,32 +62,6 @@ def _forecast_soc_attrs(d: "SolarFriendData", cfg: dict) -> dict:
     return {"hourly_soc": hourly_soc, "hourly_power": hourly_power}
 
 
-def _battery_plan_attrs(d: "SolarFriendData", cfg: dict) -> dict:
-    """Expose battery plan series for charts."""
-    plan = d.battery_plan or []
-    return {
-        "hourly_plan": plan,
-        "hourly_soc": [slot["soc"] for slot in plan],
-        "hourly_solar_charge_w": [slot["solar_charge_w"] for slot in plan],
-        "hourly_grid_charge_w": [slot["grid_charge_w"] for slot in plan],
-        "hourly_discharge_w": [slot["discharge_w"] for slot in plan],
-        "hourly_grid_import_w": [slot["grid_import_w"] for slot in plan],
-        "hourly_price": [slot["price_dkk"] for slot in plan],
-    }
-
-
-def _forecast_accuracy_14d_attrs(d: "SolarFriendData", cfg: dict) -> dict:
-    """Expose rolling forecast quality details."""
-    return {
-        "bias_factor_14d": d.forecast_bias_factor_14d,
-        "mae_14d_kwh": d.forecast_mae_14d_kwh,
-        "mape_14d_pct": d.forecast_mape_14d_pct,
-        "valid_days_14d": d.forecast_valid_days_14d,
-        "correction_valid": d.forecast_correction_valid,
-        "history_14d": d.forecast_history_14d,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Sensor catalogue
 # ---------------------------------------------------------------------------
@@ -454,115 +428,6 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         icon="mdi:weather-sunset",
         value_fn=lambda d, _: round(d.solar_until_sunset, 3),
     ),
-    SolarFriendSensorDescription(
-        key="forecast_actual_today_so_far",
-        name="Forecast Actual Today So Far",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=None,
-        icon="mdi:solar-power",
-        value_fn=lambda d, _: d.forecast_actual_today_so_far_kwh,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_predicted_today_so_far",
-        name="Forecast Predicted Today So Far",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=None,
-        icon="mdi:chart-line",
-        value_fn=lambda d, _: d.forecast_predicted_today_so_far_kwh,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_error_today_so_far",
-        name="Forecast Error Today So Far",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=None,
-        icon="mdi:chart-bell-curve-cumulative",
-        value_fn=lambda d, _: d.forecast_error_today_so_far_kwh,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_accuracy_today_so_far",
-        name="Forecast Accuracy Today So Far",
-        native_unit_of_measurement=PERCENTAGE,
-        device_class=None,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:target",
-        value_fn=lambda d, _: d.forecast_accuracy_today_so_far_pct,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_actual_yesterday",
-        name="Forecast Actual Yesterday",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=None,
-        icon="mdi:solar-power-variant",
-        value_fn=lambda d, _: d.forecast_actual_yesterday_kwh,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_predicted_yesterday",
-        name="Forecast Predicted Yesterday",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=None,
-        icon="mdi:chart-line",
-        value_fn=lambda d, _: d.forecast_predicted_yesterday_kwh,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_error_yesterday",
-        name="Forecast Error Yesterday",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=None,
-        icon="mdi:chart-bell-curve-cumulative",
-        value_fn=lambda d, _: d.forecast_error_yesterday_kwh,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_accuracy_yesterday",
-        name="Forecast Accuracy Yesterday",
-        native_unit_of_measurement=PERCENTAGE,
-        device_class=None,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:target",
-        value_fn=lambda d, _: d.forecast_accuracy_yesterday_pct,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_bias_factor_14d",
-        name="Forecast Bias Factor 14D",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-        icon="mdi:tune-variant",
-        value_fn=lambda d, _: d.forecast_bias_factor_14d,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_mae_14d",
-        name="Forecast MAE 14D",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
-        state_class=None,
-        icon="mdi:chart-timeline-variant",
-        value_fn=lambda d, _: d.forecast_mae_14d_kwh,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_mape_14d",
-        name="Forecast MAPE 14D",
-        native_unit_of_measurement=PERCENTAGE,
-        device_class=None,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:percent",
-        value_fn=lambda d, _: d.forecast_mape_14d_pct,
-    ),
-    SolarFriendSensorDescription(
-        key="forecast_accuracy_14d",
-        name="Forecast Accuracy 14D",
-        native_unit_of_measurement=PERCENTAGE,
-        device_class=None,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:calendar-check",
-        value_fn=lambda d, _: d.forecast_accuracy_14d_pct,
-        extra_attrs_fn=lambda d, cfg: _forecast_accuracy_14d_attrs(d, cfg),
-    ),
     # --- Forecast SOC chart ---
     # apexcharts-card data_generator example:
     #
@@ -594,20 +459,6 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
             else None
         ),
         extra_attrs_fn=lambda d, cfg: _forecast_soc_attrs(d, cfg),
-    ),
-    SolarFriendSensorDescription(
-        key="battery_plan",
-        name="Battery Plan",
-        native_unit_of_measurement=PERCENTAGE,
-        device_class=SensorDeviceClass.BATTERY,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:battery-clock-outline",
-        value_fn=lambda d, _: (
-            d.battery_plan[-1]["soc"]
-            if d.battery_plan
-            else None
-        ),
-        extra_attrs_fn=lambda d, cfg: _battery_plan_attrs(d, cfg),
     ),
     # --- Consumption profile chart ---
     # apexcharts-card data_generator example:

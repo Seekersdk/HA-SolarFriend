@@ -17,13 +17,12 @@ PLATFORMS = [Platform.SENSOR, Platform.NUMBER, Platform.SWITCH, Platform.SELECT]
 
 
 async def _cleanup_orphaned_ev_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Fjern legacy-entiteter for denne config entry uden at røre andre entries."""
+    """Fjern orphaned SolarFriend entiteter der ikke har entry_id som prefix i unique_id."""
     registry = er.async_get(hass)
     to_remove = [
         entity.entity_id
         for entity in registry.entities.values()
         if entity.platform == "solarfriend"
-        and entity.config_entry_id == entry.entry_id
         and not entity.unique_id.startswith(entry.entry_id)
     ]
     for entity_id in to_remove:
@@ -51,7 +50,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator: SolarFriendCoordinator = hass.data[DOMAIN].get(entry.entry_id)
     if coordinator is not None:
         coordinator.unregister_listeners()
-        await coordinator.async_persist_state()
 
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:

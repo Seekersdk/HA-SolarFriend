@@ -8,10 +8,8 @@ from typing import Any, Optional, List
 
 from .consumption_profile import ConsumptionProfile
 from .forecast_adapter import get_forecast_for_period
-from .price_adapter import get_current_price_from_raw
 
 _LOGGER = logging.getLogger(__name__)
-LOW_GRID_HOLD_PRICE = 0.10  # kr/kWh: prefer grid over battery wear near zero-price periods
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +101,7 @@ def _get_future_slots(
     # ── Step 1: parse every entry to a timezone-aware local datetime ──────
     parsed: list[tuple[datetime, float]] = []
     for entry in raw_prices:
-        raw_hour = entry.get("hour") if entry.get("hour") is not None else entry.get("start", "")
+        raw_hour = entry.get("hour", "")
         price = float(entry.get("price", 0.0))
         slot_dt: datetime | None = None
         try:
@@ -155,7 +153,7 @@ def _get_future_slots(
             continue
         _, price = best_by_hour[hour]
         predicted_watt = profile.get_predicted_watt(hour, is_weekend)
-        predicted_kwh = predicted_watt / 1000.0  # one hourly slot → kWh
+        predicted_kwh = predicted_watt / 1000 * 0.25  # one 15-min sample → kWh
         slots.append(
             {
                 "hour": hour,
@@ -202,7 +200,7 @@ def _calculate_cheapest_charge(
                 "charge_slots": [], "feasible": need_kwh <= 0}
 
     charge_slid = battery_cost_per_kwh / 2
-    kwh_per_slot = charge_rate_kw * 1.0  # hourly slot → kWh
+    kwh_per_slot = charge_rate_kw * 0.25  # 15-min slot → kWh
 
     sorted_slots = sorted(night_slots, key=lambda s: s["price"])
 
@@ -455,60 +453,36 @@ class BatteryOptimizer:
             solar_remaining = forecast_today_kwh
             solar_next_2h = 0.0
 
-        # TRIN 0 — SELL_BATTERY: sælg kun ægte overskud når sol forventes at genoplade bagefter
+        # TRIN 0 — SELL_BATTERY: sælg batteri-overskud til høj pris mens sol snart overtager
+        # Spørgsmål: "Har vi mere energi end vi behøver indtil solen kommer?"
         current_price = self._price_for_hour(raw_prices, now.hour)
         if current_price is not None:
-            reserve_buffer_kwh = 0.5
+            # Estimer forbrug fra nu til sol starter (sunrise + 1t som proxy for reel produktion)
+            solar_start = sunrise_time + timedelta(hours=1)
+            load_until_solar_kwh = 0.0
             cur = now.replace(minute=0, second=0, microsecond=0)
-
-            load_until_sunset_kwh = 0.0
-            while cur < sunset_time:
-                load_until_sunset_kwh += self._profile.get_predicted_watt(cur.hour, is_weekend) / 1000.0
+            while cur < solar_start:
+                load_until_solar_kwh += self._profile.get_predicted_watt(cur.hour, is_weekend) / 1000.0
                 cur += timedelta(hours=1)
 
-            # If solar already covers the house, keep requirement is zero.
-            if pv_power >= load_power:
-                load_until_solar_kwh = 0.0
-            elif hourly_forecast and solar_next_2h > 0:
-                next_2h_load_kwh = 0.0
-                cur = now.replace(minute=0, second=0, microsecond=0)
-                for _ in range(2):
-                    next_2h_load_kwh += self._profile.get_predicted_watt(cur.hour, is_weekend) / 1000.0
-                    cur += timedelta(hours=1)
-                load_until_solar_kwh = max(0.0, next_2h_load_kwh - solar_next_2h)
-            else:
-                solar_start = sunrise_time + timedelta(hours=1)
-                load_until_solar_kwh = 0.0
-                cur = now.replace(minute=0, second=0, microsecond=0)
-                while cur < solar_start:
-                    load_until_solar_kwh += self._profile.get_predicted_watt(cur.hour, is_weekend) / 1000.0
-                    cur += timedelta(hours=1)
-
-            future_recharge_kwh = max(0.0, solar_remaining - load_until_sunset_kwh)
-            sellable_kwh = min(
-                available_kwh,
-                max(0.0, available_kwh + future_recharge_kwh - load_until_solar_kwh - reserve_buffer_kwh),
-            )
-            net_gain = sellable_kwh * (current_price - weighted_cost)
+            sellable_kwh = max(0.0, available_kwh - load_until_solar_kwh)
+            net_gain = sellable_kwh * (current_price - self.battery_cost_per_kwh)
 
             _LOGGER.debug(
                 "SELL_BATTERY vurdering: sellable=%.1f kWh "
-                "load_until_solar=%.1f kWh future_recharge=%.1f kWh "
-                "weighted_cost=%.2f net_gain=%.2f kr",
-                sellable_kwh, load_until_solar_kwh, future_recharge_kwh,
-                weighted_cost, net_gain,
+                "load_until_solar=%.1f kWh net_gain=%.2f kr",
+                sellable_kwh, load_until_solar_kwh, net_gain,
             )
 
             if (sellable_kwh > 0.5
-                    and future_recharge_kwh > 0.5
                     and net_gain > self.min_charge_saving
-                    and current_price > weighted_cost + self.min_charge_saving):
+                    and current_price > self.battery_cost_per_kwh + self.min_charge_saving
+                    and current_price > weighted_cost):
                 return OptimizeResult(
                     strategy="SELL_BATTERY",
                     reason=(
                         f"Sælger {sellable_kwh:.1f} kWh til {current_price:.2f} kr — "
                         f"behov til sol: {load_until_solar_kwh:.1f} kWh — "
-                        f"forventet genladning {future_recharge_kwh:.1f} kWh — "
                         f"gevinst {net_gain:.2f} kr"
                     ),
                     target_soc=float(self.battery_min_soc),
@@ -563,13 +537,13 @@ class BatteryOptimizer:
         # TRIN 2 — Fremtidige slots (nu → midnat)
         future_slots = _get_future_slots(raw_prices, now.hour, 23, self._profile, is_weekend, now)
 
-        # TRIN 3 — Billig netstrøm: hold batteriet tilbage og tag udsving fra nettet
-        if current_price is not None and current_price <= max(weighted_cost, LOW_GRID_HOLD_PRICE):
+        # TRIN 3 — Grid-pris billigere end batteri?
+        if current_price is not None and current_price <= weighted_cost:
             return OptimizeResult(
-                strategy="SAVE_SOLAR",
+                strategy="IDLE",
                 reason=(
-                    f"Billig netstrøm ({current_price:.2f} kr) — "
-                    f"gemmer batteri og tager udsving fra nettet"
+                    f"Strøm fra net ({current_price:.2f} kr) er billigere end "
+                    f"batteri ({weighted_cost:.2f} kr)"
                 ),
                 target_soc=None,
                 charge_now=False,
@@ -691,45 +665,6 @@ class BatteryOptimizer:
         hourly_forecast: list | None = None,
     ) -> OptimizeResult:
         """Return a strategy for nighttime hours (between sunset and sunrise)."""
-
-        # TRIN 0 — Aftenafladning: brug batteri over morgenbehov til dyre aftentimer
-        # Morgenbehov estimeres konservativt; kun overskud bruges til aftenafladning.
-        morning_slots_pre = _get_future_slots(
-            raw_prices, now.hour, sunrise_time.hour, self._profile, is_weekend, now
-        )
-        morning_reserve_kwh = sum(s["predicted_kwh"] for s in morning_slots_pre) * 1.10
-        available_for_evening = max(0.0, available_kwh - morning_reserve_kwh)
-
-        if available_for_evening > 0.3:
-            evening_slots = _get_future_slots(
-                raw_prices, now.hour, 23, self._profile, is_weekend, now
-            )
-            evening_discharge = _find_best_discharge_hours(
-                evening_slots, available_for_evening, weighted_cost, self.min_charge_saving
-            )
-            current_hour_str = now.strftime("%H:00")
-            if current_hour_str in [s["hour_str"] for s in evening_discharge]:
-                return OptimizeResult(
-                    strategy="USE_BATTERY",
-                    reason=(
-                        f"Aftenpeak — bruger {available_for_evening:.1f} kWh over "
-                        f"morgenbehov ({morning_reserve_kwh:.1f} kWh) "
-                        f"til dyre timer: {[s['hour_str'] for s in evening_discharge]}"
-                    ),
-                    target_soc=None,
-                    charge_now=False,
-                    cheapest_charge_hour=None,
-                    night_charge_kwh=0.0,
-                    morning_need_kwh=round(morning_reserve_kwh, 4),
-                    day_deficit_kwh=0.0,
-                    peak_need_kwh=0.0,
-                    expected_saving_dkk=round(
-                        sum(s["allocated_kwh"] * s["value"] for s in evening_discharge), 4
-                    ),
-                    weighted_battery_cost=weighted_cost,
-                    solar_fraction=solar_fraction,
-                    best_discharge_hours=[s["hour_str"] for s in evening_discharge],
-                )
 
         # TRIN 1 — Forbrug inden solopgang
         morning_slots = _get_future_slots(
@@ -885,7 +820,14 @@ class BatteryOptimizer:
         solar_fraction = self._tracker.solar_fraction
 
         # ── Anti-eksport: negativ/nul spotpris ────────────────────────────
-        current_price = get_current_price_from_raw(raw_prices, now, fallback=0.0) or 0.0
+        current_price: float = 0.0
+        for slot in raw_prices:
+            if isinstance(slot, dict) and slot.get("hour") == now.hour:
+                try:
+                    current_price = float(slot.get("price", 0.0))
+                except (TypeError, ValueError):
+                    pass
+                break
 
         if current_price <= 0 and raw_prices:
             return OptimizeResult(

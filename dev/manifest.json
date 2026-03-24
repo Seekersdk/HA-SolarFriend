@@ -1,0 +1,11 @@
+{
+  "domain": "solarfriend",
+  "name": "SolarFriend",
+  "version": "0.2.0",
+  "documentation": "https://github.com/SeekersDK/SolarFriend",
+  "issue_tracker": "https://github.com/SeekersDK/SolarFriend/issues",
+  "codeowners": ["@SeekersDK"],
+  "requirements": [],
+  "iot_class": "local_polling",
+  "config_flow": true
+}
