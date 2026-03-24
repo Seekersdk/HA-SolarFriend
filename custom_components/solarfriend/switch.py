@@ -1,9 +1,10 @@
-"""SolarFriend switch platform — manual EV charging control."""
+"""SolarFriend switch platform — manual EV charging and debug controls."""
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -23,8 +24,10 @@ async def async_setup_entry(
 ) -> None:
     coordinator: SolarFriendCoordinator = hass.data[DOMAIN][entry.entry_id]
 
+    entities: list[SwitchEntity] = [SolarFriendShadowLogSwitch(coordinator, entry)]
     if entry.data.get("ev_charging_enabled", False):
-        async_add_entities([SolarFriendEVSwitch(coordinator)])
+        entities.append(SolarFriendEVSwitch(coordinator))
+    async_add_entities(entities)
 
 
 class SolarFriendEVSwitch(RestoreEntity, SwitchEntity):
@@ -73,3 +76,53 @@ class SolarFriendEVSwitch(RestoreEntity, SwitchEntity):
         self._coordinator.ev_charging_allowed = False
         self.async_write_ha_state()
         _LOGGER.info("EV ladning deaktiveret")
+
+
+class SolarFriendShadowLogSwitch(RestoreEntity, SwitchEntity):
+    """Persistent switch for enabling shadow logging."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Shadow Log"
+    _attr_icon = "mdi:file-chart"
+
+    def __init__(self, coordinator: SolarFriendCoordinator, entry: ConfigEntry) -> None:
+        self._coordinator = coordinator
+        self._entry = entry
+        self._is_on = bool(entry.data.get("shadow_log_enabled", True))
+        self._attr_unique_id = f"{entry.entry_id}_shadow_log"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.data.get("name", "SolarFriend"),
+            manufacturer="SolarFriend",
+            model="Solar Energy Manager",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        return self._is_on
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state in ("on", "off"):
+            self._is_on = last_state.state == "on"
+        self._coordinator._shadow_log_enabled = self._is_on
+        await self._persist_state()
+
+    async def _persist_state(self) -> None:
+        new_data = {**self._entry.data, "shadow_log_enabled": self._is_on}
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self._is_on = True
+        self._coordinator._shadow_log_enabled = True
+        await self._persist_state()
+        self.async_write_ha_state()
+        _LOGGER.info("Shadow log aktiveret")
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self._is_on = False
+        self._coordinator._shadow_log_enabled = False
+        await self._persist_state()
+        self.async_write_ha_state()
+        _LOGGER.info("Shadow log deaktiveret")

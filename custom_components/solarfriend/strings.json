@@ -48,7 +48,8 @@
         "data": {
           "battery_price_dkk": "Batteriets indkøbspris",
           "battery_cycles": "Forventet antal cyklusser",
-          "min_charge_saving": "Minimum besparelse før nat-opladning"
+          "min_charge_saving": "Minimum besparelse før nat-opladning",
+          "cheap_grid_threshold": "Billig netstrøm grænse"
         }
       },
       "price_sensor": {

@@ -79,6 +79,17 @@ NUMBER_DESCRIPTIONS: tuple[SolarFriendNumberDescription, ...] = (
         mode=NumberMode.SLIDER,
         icon="mdi:cash-check",
     ),
+    SolarFriendNumberDescription(
+        key="cheap_grid_threshold",
+        name="Cheap Grid Threshold",
+        config_key="cheap_grid_threshold",
+        native_min_value=0.0,
+        native_max_value=1.00,
+        native_step=0.05,
+        native_unit_of_measurement=UNIT_DKK_KWH,
+        mode=NumberMode.SLIDER,
+        icon="mdi:transmission-tower-import",
+    ),
 )
 
 
@@ -129,6 +140,7 @@ class SolarFriendNumber(RestoreEntity, NumberEntity):
             "battery_min_soc":  10.0,
             "battery_max_soc":  90.0,
             "min_charge_saving": 0.20,
+            "cheap_grid_threshold": 0.10,
         }
         fallback = defaults.get(description.config_key, description.native_min_value)
         self._attr_native_value = float(entry.data.get(description.config_key, fallback))

@@ -40,6 +40,7 @@ CONF_USABLE_CAPACITY = "usable_capacity_kwh"
 CONF_BATTERY_PRICE = "battery_price_dkk"
 CONF_BATTERY_CYCLES = "battery_cycles"
 CONF_MIN_CHARGE_SAVING = "min_charge_saving"
+CONF_CHEAP_GRID_THRESHOLD = "cheap_grid_threshold"
 CONF_BATTERY_COST_PER_KWH = "battery_cost_per_kwh"
 CONF_FORECAST_TYPE = "forecast_type"
 CONF_INVERTER_TYPE = "inverter_type"
@@ -731,6 +732,9 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
                 ),
                 vol.Required(CONF_MIN_CHARGE_SAVING, default=0.20): NumberSelector(
                     NumberSelectorConfig(min=0.05, max=1.00, step=0.05, unit_of_measurement="kr/kWh", mode=NumberSelectorMode.SLIDER)
+                ),
+                vol.Required(CONF_CHEAP_GRID_THRESHOLD, default=0.10): NumberSelector(
+                    NumberSelectorConfig(min=0.00, max=1.00, step=0.05, unit_of_measurement="kr/kWh", mode=NumberSelectorMode.SLIDER)
                 ),
             }
         )
