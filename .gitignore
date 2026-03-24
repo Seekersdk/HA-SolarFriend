@@ -38,3 +38,4 @@ custom_components/easee/
 custom_components/hacs/ 
 custom_components/kia_uvo/
 .claude/ 
+dev/
