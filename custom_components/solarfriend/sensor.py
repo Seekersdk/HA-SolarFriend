@@ -88,6 +88,20 @@ def _forecast_accuracy_14d_attrs(d: "SolarFriendData", cfg: dict) -> dict:
     }
 
 
+def _forecast_correction_model_attrs(d: "SolarFriendData", cfg: dict) -> dict:
+    """Expose passive month/hour forecast correction model diagnostics."""
+    return {
+        "current_month": d.forecast_correction_current_month,
+        "active_buckets": d.forecast_correction_active_buckets,
+        "confident_buckets": d.forecast_correction_confident_buckets,
+        "average_factor_this_month": d.forecast_correction_average_factor_this_month,
+        "today_hourly_factors": d.forecast_correction_today_hourly_factors,
+        "current_hour_factor": d.forecast_correction_current_hour_factor,
+        "current_hour_samples": d.forecast_correction_current_hour_samples,
+        "raw_vs_corrected_delta_today": d.forecast_correction_raw_vs_corrected_delta_today,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Sensor catalogue
 # ---------------------------------------------------------------------------
@@ -215,7 +229,7 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         name="Profile Days Collected",
         native_unit_of_measurement="days",
         device_class=None,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=None,
         icon="mdi:calendar-check",
         value_fn=lambda d, _: d.profile_days_collected,
     ),
@@ -562,6 +576,16 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         icon="mdi:calendar-check",
         value_fn=lambda d, _: d.forecast_accuracy_14d_pct,
         extra_attrs_fn=lambda d, cfg: _forecast_accuracy_14d_attrs(d, cfg),
+    ),
+    SolarFriendSensorDescription(
+        key="forecast_correction_model",
+        name="Forecast Correction Model",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        icon="mdi:tune-variant",
+        value_fn=lambda d, _: d.forecast_correction_model_state,
+        extra_attrs_fn=lambda d, cfg: _forecast_correction_model_attrs(d, cfg),
     ),
     # --- Forecast SOC chart ---
     # apexcharts-card data_generator example:

@@ -14,7 +14,8 @@ from .coordinator import SolarFriendCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR, Platform.NUMBER, Platform.SWITCH, Platform.SELECT]
+BUTTON_PLATFORM = getattr(Platform, "BUTTON", "button")
+PLATFORMS = [Platform.SENSOR, Platform.NUMBER, Platform.SWITCH, Platform.SELECT, BUTTON_PLATFORM]
 
 
 async def _async_handle_populate_load_model(hass: HomeAssistant, call: Any) -> None:

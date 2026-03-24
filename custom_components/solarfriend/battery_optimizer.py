@@ -159,6 +159,7 @@ class BatteryOptimizer:
         self,
         hourly_forecast: list | None,
         now: datetime,
+        reserved_solar_kwh: dict[datetime, float] | None = None,
     ) -> dict[datetime, float]:
         """Aggregate forecast entries by local hour."""
         forecast_by_hour: dict[datetime, float] = {}
@@ -180,6 +181,17 @@ class BatteryOptimizer:
                 entry.get("pv_estimate_kwh", 0.0)
             )
 
+        if reserved_solar_kwh:
+            for slot_start, reserved_kwh in reserved_solar_kwh.items():
+                normalized_start = self._normalize_datetime(slot_start, now).replace(
+                    minute=0, second=0, microsecond=0
+                )
+                if normalized_start in forecast_by_hour:
+                    forecast_by_hour[normalized_start] = max(
+                        0.0,
+                        forecast_by_hour[normalized_start] - float(reserved_kwh),
+                    )
+
         return forecast_by_hour
 
     def _build_horizon_plan(
@@ -190,6 +202,7 @@ class BatteryOptimizer:
         raw_prices: list[dict[str, Any]],
         weighted_cost: float,
         hourly_forecast: list | None,
+        reserved_solar_kwh: dict[datetime, float] | None = None,
     ) -> list[dict[str, Any]]:
         """Build a battery plan over the full known price horizon."""
         horizon = self._build_price_horizon(raw_prices, now)
@@ -203,7 +216,7 @@ class BatteryOptimizer:
             0.0,
             (current_soc - self.battery_min_soc) / 100.0 * self.battery_capacity_kwh,
         )
-        forecast_by_hour = self._build_forecast_map(hourly_forecast, now)
+        forecast_by_hour = self._build_forecast_map(hourly_forecast, now, reserved_solar_kwh)
 
         slots: list[dict[str, Any]] = []
         for item in horizon:
@@ -355,6 +368,7 @@ class BatteryOptimizer:
         sunset_time: "datetime",
         is_weekend: bool,
         hourly_forecast: list | None = None,
+        reserved_solar_kwh: dict[datetime, float] | None = None,
     ) -> OptimizeResult:
         """Main entry point called by the coordinator.
 
@@ -381,6 +395,7 @@ class BatteryOptimizer:
                 raw_prices=raw_prices,
                 weighted_cost=weighted_cost,
                 hourly_forecast=hourly_forecast,
+                reserved_solar_kwh=reserved_solar_kwh,
             )
             return OptimizeResult(
                 strategy="ANTI_EXPORT",
@@ -417,6 +432,7 @@ class BatteryOptimizer:
             raw_prices=raw_prices,
             weighted_cost=weighted_cost,
             hourly_forecast=hourly_forecast,
+            reserved_solar_kwh=reserved_solar_kwh,
         )
         current_slot = self._last_plan[0] if self._last_plan else None
 

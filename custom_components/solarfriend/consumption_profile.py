@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -18,6 +19,37 @@ DEFAULT_WATT = 500.0
 _CONFIDENCE_LOW = 3
 _CONFIDENCE_MEDIUM = 7
 _CONFIDENCE_HIGH = 14
+_SEED_MATCH_ABS_W = 50.0
+_SEED_MATCH_REL = 0.05
+_SEED_HISTORY_WEIGHT = 3.0
+_SEED_MIN_DIRECT_SAMPLES = 3.0
+
+
+def _to_float(value: Any) -> float | None:
+    """Return float(value) or None on invalid input."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sensor_seed_mode(unit: str | None, state_class: str | None) -> str:
+    """Classify the source sensor for seeding."""
+    unit_norm = (unit or "").lower()
+    state_class_norm = (state_class or "").lower()
+
+    if unit_norm in {"w", "kw"}:
+        return "power"
+    if unit_norm in {"wh", "kwh"} and state_class_norm in {"total", "total_increasing"}:
+        return "energy"
+    if unit_norm in {"wh", "kwh"}:
+        return "energy"
+    return "power"
+
+
+def _power_to_watt(value: float, unit: str | None) -> float:
+    """Normalize a power value to watts."""
+    return value * 1000.0 if (unit or "").lower() == "kw" else value
 
 
 def _percentile_filter(values: list[float], percentile: float = 85) -> list[float]:
@@ -51,6 +83,193 @@ class ConsumptionProfile:
 
     def _store(self, hass: HomeAssistant) -> Store:
         return Store(hass, STORAGE_VERSION, STORAGE_KEY)
+
+    @staticmethod
+    def _bucket_key(dt: datetime) -> tuple[str, int]:
+        """Map a timestamp to profile bucket."""
+        return ("weekday" if dt.weekday() < 5 else "weekend", dt.hour)
+
+    @staticmethod
+    def _distribute_energy_to_buckets(
+        start: datetime,
+        end: datetime,
+        energy_kwh: float,
+        buckets: dict[tuple[str, int], dict[str, float]],
+    ) -> None:
+        """Distribute interval energy proportionally across hour buckets."""
+        if end <= start or energy_kwh <= 0:
+            return
+
+        total_seconds = (end - start).total_seconds()
+        cursor = start
+        while cursor < end:
+            next_hour = (cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+            segment_end = min(end, next_hour)
+            segment_seconds = (segment_end - cursor).total_seconds()
+            fraction = segment_seconds / total_seconds if total_seconds > 0 else 0.0
+            bucket = buckets[ConsumptionProfile._bucket_key(cursor)]
+            bucket["energy_kwh"] += energy_kwh * fraction
+            bucket["duration_h"] += segment_seconds / 3600.0
+            cursor = segment_end
+
+    def _seed_bucket(
+        self,
+        *,
+        day_type: str,
+        hour: int,
+        seeded_avg_watt: float,
+        force: bool,
+        history_weight: float = _SEED_HISTORY_WEIGHT,
+    ) -> bool:
+        """Apply seeded data while prioritising existing live samples."""
+        slot = self._profiles[day_type][hour]
+        current_samples = float(slot["samples"])
+        current_avg = float(slot["avg_watt"])
+
+        if current_samples <= 0:
+            slot["avg_watt"] = round(seeded_avg_watt, 1)
+            slot["samples"] = max(_SEED_MIN_DIRECT_SAMPLES, history_weight)
+            return True
+
+        difference = abs(current_avg - seeded_avg_watt)
+        if difference <= max(_SEED_MATCH_ABS_W, abs(current_avg) * _SEED_MATCH_REL):
+            return False
+
+        if not force and current_samples >= 5:
+            return False
+
+        blend_weight = min(history_weight, max(1.0, current_samples / 4.0))
+        blended_avg = (
+            (current_avg * current_samples) + (seeded_avg_watt * blend_weight)
+        ) / (current_samples + blend_weight)
+        slot["avg_watt"] = round(blended_avg, 1)
+        # Keep live maturity intact; seeded history should not masquerade as live samples.
+        slot["samples"] = current_samples
+        return True
+
+    def _seed_from_power_history(
+        self,
+        states: list[Any],
+        end_time: datetime,
+        *,
+        force: bool,
+        unit: str | None,
+    ) -> int:
+        """Seed from power measurements by integrating W over time."""
+        bucket_energy: dict[tuple[str, int], dict[str, float]] = defaultdict(
+            lambda: {"energy_kwh": 0.0, "duration_h": 0.0}
+        )
+
+        valid_points: list[tuple[datetime, float]] = []
+        for state in states:
+            if state.state in ("unknown", "unavailable"):
+                continue
+            raw_value = _to_float(state.state)
+            watt = _power_to_watt(raw_value, unit) if raw_value is not None else None
+            if watt is None or watt <= 0:
+                continue
+            valid_points.append((state.last_changed, watt))
+
+        if not valid_points:
+            return 0
+        if len({point[0] for point in valid_points}) < 2:
+            return self._seed_from_point_history(states, force=force, unit=unit)
+
+        valid_points.sort(key=lambda item: item[0])
+        for index, (start_dt, watt) in enumerate(valid_points):
+            if index + 1 < len(valid_points):
+                end_dt = valid_points[index + 1][0]
+            else:
+                next_hour = start_dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                end_dt = min(end_time, next_hour)
+            if end_dt <= start_dt:
+                continue
+            energy_kwh = (watt * (end_dt - start_dt).total_seconds()) / 3_600_000.0
+            self._distribute_energy_to_buckets(start_dt, end_dt, energy_kwh, bucket_energy)
+
+        bootstrapped = 0
+        for (day_type, hour), bucket in bucket_energy.items():
+            duration_h = bucket["duration_h"]
+            if duration_h <= 0:
+                continue
+            avg_watt = (bucket["energy_kwh"] / duration_h) * 1000.0
+            if self._seed_bucket(day_type=day_type, hour=hour, seeded_avg_watt=avg_watt, force=force):
+                bootstrapped += 1
+        return bootstrapped
+
+    def _seed_from_energy_history(
+        self,
+        states: list[Any],
+        end_time: datetime,
+        *,
+        force: bool,
+        unit: str | None,
+    ) -> int:
+        """Seed from cumulative energy history by distributing deltas over time."""
+        unit_norm = (unit or "").lower()
+        factor_to_kwh = 1.0 if unit_norm == "kwh" else 0.001
+        bucket_energy: dict[tuple[str, int], dict[str, float]] = defaultdict(
+            lambda: {"energy_kwh": 0.0, "duration_h": 0.0}
+        )
+
+        valid_points: list[tuple[datetime, float]] = []
+        for state in states:
+            if state.state in ("unknown", "unavailable"):
+                continue
+            value = _to_float(state.state)
+            if value is None:
+                continue
+            valid_points.append((state.last_changed, value * factor_to_kwh))
+
+        if len(valid_points) < 2:
+            return 0
+
+        valid_points.sort(key=lambda item: item[0])
+        for index in range(len(valid_points) - 1):
+            start_dt, start_kwh = valid_points[index]
+            end_dt, end_kwh = valid_points[index + 1]
+            if end_dt <= start_dt:
+                continue
+            delta_kwh = end_kwh - start_kwh
+            if delta_kwh <= 0:
+                continue
+            self._distribute_energy_to_buckets(start_dt, end_dt, delta_kwh, bucket_energy)
+
+        bootstrapped = 0
+        for (day_type, hour), bucket in bucket_energy.items():
+            duration_h = bucket["duration_h"]
+            if duration_h <= 0:
+                continue
+            avg_watt = (bucket["energy_kwh"] / duration_h) * 1000.0
+            if self._seed_bucket(day_type=day_type, hour=hour, seeded_avg_watt=avg_watt, force=force):
+                bootstrapped += 1
+        return bootstrapped
+
+    def _seed_from_point_history(
+        self,
+        states: list[Any],
+        *,
+        force: bool,
+        unit: str | None = None,
+    ) -> int:
+        """Fallback seed from point-in-time averages."""
+        buckets: dict[tuple[str, int], list[float]] = defaultdict(list)
+        for state in states:
+            if state.state in ("unknown", "unavailable"):
+                continue
+            raw_value = _to_float(state.state)
+            watt = _power_to_watt(raw_value, unit) if raw_value is not None else None
+            if watt is None or watt <= 0:
+                continue
+            buckets[self._bucket_key(state.last_changed)].append(watt)
+
+        bootstrapped = 0
+        for (day_type, hour), values in buckets.items():
+            filtered = _percentile_filter(values, percentile=85)
+            avg_watt = sum(filtered) / len(filtered)
+            if self._seed_bucket(day_type=day_type, hour=hour, seeded_avg_watt=avg_watt, force=force):
+                bootstrapped += 1
+        return bootstrapped
 
     async def async_load(self, hass: HomeAssistant) -> None:
         """Load profiles from HA storage. Keeps defaults if no data found."""
@@ -166,12 +385,14 @@ class ConsumptionProfile:
         if not force and self.days_collected >= 3:
             return 0
 
-        from collections import defaultdict
-        from datetime import timedelta
-
         import homeassistant.util.dt as ha_dt
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.history import get_significant_states
+
+        state_obj = hass.states.get(entity_id) if getattr(hass, "states", None) else None
+        unit = state_obj.attributes.get("unit_of_measurement") if state_obj is not None else None
+        state_class = state_obj.attributes.get("state_class") if state_obj is not None else None
+        seed_mode = _sensor_seed_mode(unit, state_class)
 
         end_time = ha_dt.now()
         start_time = end_time - timedelta(days=days)
@@ -194,48 +415,35 @@ class ConsumptionProfile:
             _LOGGER.warning("Bootstrap: ingen historik for %s", entity_id)
             return 0
 
-        buckets: dict[tuple[str, int], list[float]] = defaultdict(list)
+        localized_states = []
         for state in entity_states:
-            if state.state in ("unknown", "unavailable"):
-                continue
-            try:
-                watt = float(state.state)
-                if watt <= 0:
-                    continue
-                dt = ha_dt.as_local(state.last_changed)
-                day_type = "weekday" if dt.weekday() < 5 else "weekend"
-                buckets[(day_type, dt.hour)].append(watt)
-            except (ValueError, TypeError):
-                continue
+            dt = ha_dt.as_local(state.last_changed)
+            localized_states.append(type("HistoryPoint", (), {"state": state.state, "last_changed": dt}))
 
-        if not buckets:
-            return 0
-
-        bootstrapped = 0
-        for (day_type, hour), values in buckets.items():
-            filtered = _percentile_filter(values, percentile=85)
-            avg_watt = sum(filtered) / len(filtered)
-            slot = self._profiles[day_type][hour]
-            if force or slot["samples"] < 5:
-                slot["avg_watt"] = round(avg_watt, 1)
-                # Make bootstrapped buckets immediately usable after restart.
-                slot["samples"] = max(float(slot["samples"]), 3.0)
-                bootstrapped += 1
-                _LOGGER.debug(
-                    "Bootstrap %s h%02d: %d readings -> %d after filter -> %.0fW",
-                    day_type,
-                    hour,
-                    len(values),
-                    len(filtered),
-                    avg_watt,
-                )
+        if seed_mode == "energy":
+            bootstrapped = self._seed_from_energy_history(
+                localized_states,
+                end_time=ha_dt.as_local(end_time),
+                force=force,
+                unit=unit,
+            )
+        elif seed_mode == "power":
+            bootstrapped = self._seed_from_power_history(
+                localized_states,
+                end_time=ha_dt.as_local(end_time),
+                force=force,
+                unit=unit,
+            )
+        else:
+            bootstrapped = self._seed_from_point_history(localized_states, force=force, unit=unit)
 
         if bootstrapped > 0:
             await self.async_save(hass)
             _LOGGER.info(
-                "Bootstrap: %d buckets from %d days of history%s",
+                "Bootstrap: %d buckets from %d days of %s history%s",
                 bootstrapped,
                 days,
+                seed_mode,
                 " (forced)" if force else "",
             )
 

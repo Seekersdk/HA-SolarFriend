@@ -1,0 +1,185 @@
+title: Forecast Correction Board
+views:
+  - title: Forecast Correction
+    path: forecast-correction
+    icon: mdi:tune-variant
+    badges: []
+    cards:
+      - type: markdown
+        content: |
+          # Forecast Correction Board
+
+          Debug-board for den passive month/hour forecast correction model.
+
+          Denne model **påvirker ikke styringen endnu**. Den bygger kun en læringsmodel og viser:
+          - modelstatus (`inactive`, `learning`, `ready`)
+          - aktive/confident buckets for den aktuelle måned
+          - foreslåede faktorer for dagens soltimer
+          - forskellen mellem rå forecast og model-korrigeret forecast for i dag
+
+          Hvis din entity ikke hedder `sensor.solarfriend_forecast_correction_model`, så ret entity-id'erne i denne fil.
+
+      - type: entities
+        title: Model Status
+        show_header_toggle: false
+        entities:
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Forecast Correction Model
+          - entity: sensor.solarfriend_forecast_bias_factor_14d
+            name: Global 14d Bias Factor
+          - entity: sensor.solarfriend_forecast_accuracy_14d
+            name: Forecast Accuracy 14d
+          - entity: sensor.solarfriend_forecast_accuracy_today_so_far
+            name: Forecast Accuracy Today So Far
+          - entity: sensor.solarfriend_forecast_error_today_so_far
+            name: Forecast Error Today So Far
+
+      - type: glance
+        title: Quick Diagnostics
+        show_state: true
+        entities:
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Model
+            attribute: current_month
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Active Buckets
+            attribute: active_buckets
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Confident Buckets
+            attribute: confident_buckets
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Avg Factor
+            attribute: average_factor_this_month
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Current Factor
+            attribute: current_hour_factor
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Current Samples
+            attribute: current_hour_samples
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Delta Today
+            attribute: raw_vs_corrected_delta_today
+
+      - type: custom:apexcharts-card
+        header:
+          title: Today's Proposed Hourly Factors
+          show: true
+        graph_span: 24h
+        span:
+          start: day
+        apex_config:
+          chart:
+            height: 320
+          xaxis:
+            type: datetime
+          yaxis:
+            min: 0.5
+            max: 1.5
+            decimalsInFloat: 3
+        series:
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Proposed Factor
+            type: line
+            color: "#FF9800"
+            stroke_width: 3
+            unit: factor
+            data_generator: |
+              const factors = entity.attributes.today_hourly_factors || {};
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return Object.entries(factors).map(([label, data]) => {
+                const hour = parseInt(label.split(':')[0], 10);
+                return [
+                  today.getTime() + hour * 3600000,
+                  Number(data.factor || 1.0)
+                ];
+              });
+
+      - type: custom:apexcharts-card
+        header:
+          title: Today's Hourly Sample Depth
+          show: true
+        graph_span: 24h
+        span:
+          start: day
+        apex_config:
+          chart:
+            height: 300
+          xaxis:
+            type: datetime
+        series:
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Samples
+            type: column
+            color: "#4CAF50"
+            unit: samples
+            data_generator: |
+              const factors = entity.attributes.today_hourly_factors || {};
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return Object.entries(factors).map(([label, data]) => {
+                const hour = parseInt(label.split(':')[0], 10);
+                return [
+                  today.getTime() + hour * 3600000,
+                  Number(data.samples || 0)
+                ];
+              });
+
+      - type: custom:apexcharts-card
+        header:
+          title: Forecast Accuracy and Bias
+          show: true
+        graph_span: 14d
+        span:
+          start: day
+          offset: -13d
+        apex_config:
+          chart:
+            height: 320
+        yaxis:
+          - id: pct
+            min: 0
+            max: 100
+          - id: factor
+            opposite: true
+            min: 0.5
+            max: 1.5
+        series:
+          - entity: sensor.solarfriend_forecast_accuracy_14d
+            name: Accuracy 14d
+            type: line
+            color: "#2196F3"
+            yaxis_id: pct
+            extend_to: false
+          - entity: sensor.solarfriend_forecast_bias_factor_14d
+            name: Bias Factor 14d
+            type: line
+            color: "#9C27B0"
+            yaxis_id: factor
+            extend_to: false
+
+      - type: entities
+        title: Raw Model Attributes
+        show_header_toggle: false
+        entities:
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Current Month
+            attribute: current_month
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Active Buckets
+            attribute: active_buckets
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Confident Buckets
+            attribute: confident_buckets
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Average Factor This Month
+            attribute: average_factor_this_month
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Current Hour Factor
+            attribute: current_hour_factor
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Current Hour Samples
+            attribute: current_hour_samples
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Raw vs Corrected Delta Today
+            attribute: raw_vs_corrected_delta_today

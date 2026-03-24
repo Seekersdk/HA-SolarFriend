@@ -1,4 +1,4 @@
-"""SolarFriend BatteryTracker — tracks battery content by origin (solar vs. grid)."""
+"""SolarFriend BatteryTracker tracks battery content and savings over time."""
 from __future__ import annotations
 
 import logging
@@ -27,19 +27,15 @@ class BatteryTracker:
         self._store = Store(hass, STORAGE_VERSION, f"solarfriend_battery_tracker_{entry_id}")
         self.solar_kwh: float = 0.0
         self.grid_kwh: float = 0.0
-        self.grid_avg_cost: float = 0.0  # weighted avg cost of grid kWh in battery
+        self.grid_avg_cost: float = 0.0
 
-        # Savings tracking — today (reset at midnight) + lifetime totals
+        # Savings tracking: today (reset at midnight) + persisted totals.
         self.today_solar_direct_kwh: float = 0.0
         self.today_solar_direct_saved_dkk: float = 0.0
         self.today_optimizer_saved_dkk: float = 0.0
         self.total_solar_direct_saved_dkk: float = 0.0
         self.total_optimizer_saved_dkk: float = 0.0
-        self._last_reset_date: str = ""  # ISO date, e.g. "2026-03-22"
-
-    # ------------------------------------------------------------------
-    # Slid (wear cost) helpers
-    # ------------------------------------------------------------------
+        self._last_reset_date: str = ""
 
     @property
     def _charge_slid(self) -> float:
@@ -48,10 +44,6 @@ class BatteryTracker:
     @property
     def _discharge_slid(self) -> float:
         return self._battery_cost_per_kwh / 2
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
 
     @property
     def total_kwh(self) -> float:
@@ -69,11 +61,7 @@ class BatteryTracker:
 
     @property
     def weighted_cost(self) -> float:
-        """Weighted average cost of all energy currently in the battery.
-
-        solar kWh carries only charge_slid (wear on charging side).
-        grid kWh carries grid_avg_cost (already includes charge_slid) + discharge_slid.
-        """
+        """Weighted average cost of all energy currently in the battery."""
         total = self.total_kwh
         if total == 0:
             return 0.0
@@ -81,9 +69,15 @@ class BatteryTracker:
         grid_cost = self.grid_kwh * (self.grid_avg_cost + self._discharge_slid)
         return (solar_cost + grid_cost) / total
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
+    @property
+    def live_total_solar_saved_dkk(self) -> float:
+        """Lifetime solar saving including today's running total."""
+        return self.total_solar_direct_saved_dkk + self.today_solar_direct_saved_dkk
+
+    @property
+    def live_total_optimizer_saved_dkk(self) -> float:
+        """Lifetime optimizer saving including today's running total."""
+        return self.total_optimizer_saved_dkk + self.today_optimizer_saved_dkk
 
     async def async_load(self) -> None:
         """Load tracker state from HA storage."""
@@ -103,8 +97,11 @@ class BatteryTracker:
         _LOGGER.debug(
             "BatteryTracker loaded: solar=%.3f kWh grid=%.3f kWh avg_cost=%.4f "
             "today_solar_saved=%.4f kr today_optimizer_saved=%.4f kr",
-            self.solar_kwh, self.grid_kwh, self.grid_avg_cost,
-            self.today_solar_direct_saved_dkk, self.today_optimizer_saved_dkk,
+            self.solar_kwh,
+            self.grid_kwh,
+            self.grid_avg_cost,
+            self.today_solar_direct_saved_dkk,
+            self.today_optimizer_saved_dkk,
         )
 
     async def async_save(self) -> None:
@@ -124,16 +121,12 @@ class BatteryTracker:
             }
         )
 
-    # ------------------------------------------------------------------
-    # Charge / discharge events
-    # ------------------------------------------------------------------
-
     def on_solar_charge(self, kwh: float) -> None:
         """Record kWh charged from solar surplus."""
         if kwh <= 0:
             return
         self.solar_kwh += kwh
-        _LOGGER.debug("BatteryTracker solar charge +%.4f kWh → solar=%.3f", kwh, self.solar_kwh)
+        _LOGGER.debug("BatteryTracker solar charge +%.4f kWh -> solar=%.3f", kwh, self.solar_kwh)
 
     def on_grid_charge(self, kwh: float, grid_price: float) -> None:
         """Record kWh charged from the grid, updating weighted average cost."""
@@ -148,12 +141,15 @@ class BatteryTracker:
             self.grid_avg_cost = new_cost
         self.grid_kwh += kwh
         _LOGGER.debug(
-            "BatteryTracker grid charge +%.4f kWh @ %.4f → grid=%.3f avg_cost=%.4f",
-            kwh, grid_price, self.grid_kwh, self.grid_avg_cost,
+            "BatteryTracker grid charge +%.4f kWh @ %.4f -> grid=%.3f avg_cost=%.4f",
+            kwh,
+            grid_price,
+            self.grid_kwh,
+            self.grid_avg_cost,
         )
 
     def on_discharge(self, kwh: float) -> None:
-        """Discharge kWh — grid kWh consumed first, then solar."""
+        """Discharge kWh. Grid kWh is consumed first, then solar."""
         if kwh <= 0:
             return
         from_grid = min(kwh, self.grid_kwh)
@@ -161,22 +157,18 @@ class BatteryTracker:
         remaining = kwh - from_grid
         self.solar_kwh = max(0.0, self.solar_kwh - remaining)
         _LOGGER.debug(
-            "BatteryTracker discharge %.4f kWh (grid=%.4f solar=%.4f) → solar=%.3f grid=%.3f",
-            kwh, from_grid, remaining, self.solar_kwh, self.grid_kwh,
+            "BatteryTracker discharge %.4f kWh (grid=%.4f solar=%.4f) -> solar=%.3f grid=%.3f",
+            kwh,
+            from_grid,
+            remaining,
+            self.solar_kwh,
+            self.grid_kwh,
         )
-
-    # ------------------------------------------------------------------
-    # SOC correction
-    # ------------------------------------------------------------------
 
     def on_soc_correction(
         self, actual_soc: float, capacity_kwh: float, min_soc: float
     ) -> None:
-        """Reconcile tracker with actual SOC reading.
-
-        If the tracker has drifted more than 10% from the measured value,
-        scale solar_kwh and grid_kwh proportionally to match.
-        """
+        """Reconcile tracker with the measured SOC."""
         actual_total = max(0.0, (actual_soc - min_soc) / 100 * capacity_kwh)
         tracked_total = self.total_kwh
 
@@ -184,9 +176,8 @@ class BatteryTracker:
             return
 
         if tracked_total == 0:
-            # Tracker was reset but battery has charge — attribute all to solar (unknown origin)
             self.solar_kwh = actual_total
-            _LOGGER.debug("BatteryTracker cold-start correction: %.3f kWh → solar", actual_total)
+            _LOGGER.debug("BatteryTracker cold-start correction: %.3f kWh -> solar", actual_total)
             return
 
         drift = abs(actual_total - tracked_total) / max(tracked_total, 0.001)
@@ -195,16 +186,16 @@ class BatteryTracker:
             self.solar_kwh *= scale
             self.grid_kwh *= scale
             _LOGGER.warning(
-                "BatteryTracker drift %.1f%% (tracked=%.3f actual=%.3f) — scaled by %.4f",
-                drift * 100, tracked_total, actual_total, scale,
+                "BatteryTracker drift %.1f%% (tracked=%.3f actual=%.3f) -> scaled by %.4f",
+                drift * 100,
+                tracked_total,
+                actual_total,
+                scale,
             )
 
-    # ------------------------------------------------------------------
-    # Savings tracking
-    # ------------------------------------------------------------------
-
-    def _check_midnight_reset(self) -> None:
-        """Roll today's savings into lifetime totals when the date has changed."""
+    def _check_midnight_reset(self) -> bool:
+        """Roll today's savings into persisted totals when the date changes."""
+        rolled = False
         today = datetime.now().date().isoformat()
         if self._last_reset_date and self._last_reset_date != today:
             self.total_solar_direct_saved_dkk += self.today_solar_direct_saved_dkk
@@ -212,14 +203,15 @@ class BatteryTracker:
             self.today_solar_direct_kwh = 0.0
             self.today_solar_direct_saved_dkk = 0.0
             self.today_optimizer_saved_dkk = 0.0
+            rolled = True
             _LOGGER.info(
-                "BatteryTracker: ny dag %s — "
-                "total_sol=%.2f kr total_opt=%.2f kr",
+                "BatteryTracker: new day %s -> total_sol=%.2f kr total_opt=%.2f kr",
                 today,
                 self.total_solar_direct_saved_dkk,
                 self.total_optimizer_saved_dkk,
             )
         self._last_reset_date = today
+        return rolled
 
     def update_savings(
         self,
@@ -228,37 +220,31 @@ class BatteryTracker:
         battery_w: float,
         price_dkk: float,
         dt_seconds: float,
-    ) -> None:
-        """Track solar-direct and optimizer savings for this tick.
-
-        Called every poll cycle when dt_seconds > 0 and price > 0.
-        Handles daily reset: today's totals roll into lifetime totals at midnight.
-        """
+    ) -> bool:
+        """Track solar-direct and optimizer savings for this tick."""
         if dt_seconds <= 0 or price_dkk <= 0:
-            return
+            return False
 
-        self._check_midnight_reset()
+        changed = self._check_midnight_reset()
 
-        # W × seconds / 3_600_000 = kWh
         pv_kwh = pv_w * dt_seconds / 3_600_000
         load_kwh = load_w * dt_seconds / 3_600_000
         battery_kwh = abs(battery_w) * dt_seconds / 3_600_000
 
-        # Direct solar to house: sol der hverken går i batteri eller eksporteres
         direct_solar_kwh = max(0.0, min(pv_kwh, load_kwh))
-        self.today_solar_direct_kwh += direct_solar_kwh
-        self.today_solar_direct_saved_dkk += direct_solar_kwh * price_dkk
+        if direct_solar_kwh > 0:
+            self.today_solar_direct_kwh += direct_solar_kwh
+            self.today_solar_direct_saved_dkk += direct_solar_kwh * price_dkk
+            changed = True
 
-        # Optimizer saving: batteri aflader til bedre pris end hvad det kostede
-        if battery_w > 0 and price_dkk > self.weighted_cost:
+        if battery_w > 0 and price_dkk > self.weighted_cost and battery_kwh > 0:
             self.today_optimizer_saved_dkk += battery_kwh * (price_dkk - self.weighted_cost)
+            changed = True
 
-    # ------------------------------------------------------------------
-    # Reset
-    # ------------------------------------------------------------------
+        return changed
 
     def reset(self) -> None:
-        """Clear all tracked energy (e.g. after battery replacement)."""
+        """Clear all tracked energy and savings."""
         self.solar_kwh = 0.0
         self.grid_kwh = 0.0
         self.grid_avg_cost = 0.0
