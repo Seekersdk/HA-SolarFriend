@@ -120,6 +120,7 @@ class SolarFriendData:
     # Consumption profile
     profile_confidence: str = "LEARNING"
     profile_days_collected: int = 0
+    consumption_profile_debug: dict[str, Any] = field(default_factory=dict)
 
     # Optimizer result (None until first run)
     optimize_result: OptimizeResult | None = None
@@ -402,6 +403,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             if self.data is not None:
                 self.data.profile_confidence = self._profile.confidence
                 self.data.profile_days_collected = self._profile.days_collected
+                self.data.consumption_profile_debug = self._profile.build_debug_snapshot()
                 self.data.consumption_profile_chart = [
                     self._profile.get_predicted_watt(hour, False) for hour in range(24)
                 ]
@@ -1355,6 +1357,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         data.profile_confidence = self._profile.confidence
         data.profile_days_collected = self._profile.days_collected
+        data.consumption_profile_debug = self._profile.build_debug_snapshot()
 
         await self._append_shadow_log(
             self._build_shadow_payload(

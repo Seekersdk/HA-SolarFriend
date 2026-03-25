@@ -664,6 +664,14 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
             "day_type": d.consumption_profile_day_type,
             "confidence": d.profile_confidence,
             "days_collected": d.profile_days_collected,
+            "weekday_populated_hours": d.consumption_profile_debug.get("weekday", {}).get("populated_hours", 0),
+            "weekend_populated_hours": d.consumption_profile_debug.get("weekend", {}).get("populated_hours", 0),
+            "weekday_median_samples": d.consumption_profile_debug.get("weekday", {}).get("median_samples", 0.0),
+            "weekend_median_samples": d.consumption_profile_debug.get("weekend", {}).get("median_samples", 0.0),
+            "weekday_days_estimate": d.consumption_profile_debug.get("weekday", {}).get("days_estimate", 0),
+            "weekend_days_estimate": d.consumption_profile_debug.get("weekend", {}).get("days_estimate", 0),
+            "weekday_samples_per_hour": d.consumption_profile_debug.get("weekday", {}).get("samples_per_hour", {}),
+            "weekend_samples_per_hour": d.consumption_profile_debug.get("weekend", {}).get("samples_per_hour", {}),
         },
     ),
 )
@@ -703,7 +711,7 @@ async def async_setup_entry(
                 coordinator, "ev_surplus_w", "Sol-overskud",
                 UnitOfPower.WATT, SensorDeviceClass.POWER,
                 SensorStateClass.MEASUREMENT, "mdi:solar-power",
-                lambda d: d.ev_surplus_w,
+                lambda d: max(0.0, d.ev_surplus_w),
             ),
             SolarFriendEVSensor(
                 coordinator, "ev_strategy_reason", "Strategi",

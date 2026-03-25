@@ -11,6 +11,7 @@ from homeassistant.helpers.storage import Store
 _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
+STORAGE_KEY = "solarfriend_battery_tracker"
 _DRIFT_THRESHOLD = 0.10  # log warning if tracker drifts >10% from actual SOC
 
 
@@ -23,8 +24,10 @@ class BatteryTracker:
         entry_id: str,
         battery_cost_per_kwh: float,
     ) -> None:
+        self._hass = hass
+        self._legacy_entry_id = entry_id
         self._battery_cost_per_kwh = battery_cost_per_kwh
-        self._store = Store(hass, STORAGE_VERSION, f"solarfriend_battery_tracker_{entry_id}")
+        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.solar_kwh: float = 0.0
         self.grid_kwh: float = 0.0
         self.grid_avg_cost: float = 0.0
@@ -82,6 +85,19 @@ class BatteryTracker:
     async def async_load(self) -> None:
         """Load tracker state from HA storage."""
         data: dict[str, Any] | None = await self._store.async_load()
+        if not data and self._legacy_entry_id:
+            legacy_store = Store(
+                self._hass,
+                STORAGE_VERSION,
+                f"{STORAGE_KEY}_{self._legacy_entry_id}",
+            )
+            data = await legacy_store.async_load()
+            if data:
+                _LOGGER.info(
+                    "BatteryTracker migrated legacy storage for entry_id=%s to stable key",
+                    self._legacy_entry_id,
+                )
+                await self._store.async_save(data)
         if not data:
             _LOGGER.debug("BatteryTracker: no stored data, starting fresh")
             return

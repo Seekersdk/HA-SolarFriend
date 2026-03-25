@@ -512,16 +512,35 @@ async def _detect_kia_entities(
     soc_entity = max(soc_candidates, default=(0, None))[1] if soc_candidates else None
 
     # --- Plugged-in binary sensor ---
-    plugged_in_entity: str | None = None
+    plugged_in_candidates: list[tuple[int, str]] = []
     for entry in registry.entities.values():
         if entry.domain != "binary_sensor":
             continue
         eid = entry.entity_id.lower()
-        if any(kw in eid for kw in ("plugged_in", "ev_battery_charge", "charging")):
-            state = hass.states.get(entry.entity_id)
-            if state and state.state in ("on", "off"):
-                plugged_in_entity = entry.entity_id
-                break
+        if not any(brand in eid for brand in ("kia", "hyundai", "niro")):
+            continue
+        if not any(kw in eid for kw in ("plugged_in", "ev_battery_plug", "ev_battery_charge", "charging", "plug")):
+            continue
+
+        state = hass.states.get(entry.entity_id)
+        if not state or state.state not in ("on", "off"):
+            continue
+
+        score = 0
+        if "ev_battery_plug" in eid:
+            score += 5
+        elif "plugged_in" in eid:
+            score += 4
+        elif "plug" in eid:
+            score += 3
+        elif "ev_battery_charge" in eid:
+            score += 2
+        elif "charging" in eid:
+            score += 1
+
+        plugged_in_candidates.append((score, entry.entity_id))
+
+    plugged_in_entity = max(plugged_in_candidates, default=(0, None))[1] if plugged_in_candidates else None
 
     # --- Target SOC entity (sensor or number) ---
     target_soc_candidates: list[tuple[int, str]] = []

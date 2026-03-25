@@ -479,6 +479,25 @@ class ConsumptionProfile:
             day_estimates.append(int(median_samples // 4))
         return max(day_estimates, default=0)
 
+    def build_debug_snapshot(self) -> dict[str, Any]:
+        """Expose raw learning metrics behind days_collected for diagnostics."""
+        snapshot: dict[str, Any] = {}
+        for profile_key, profile in self._profiles.items():
+            populated = [float(slot["samples"]) for slot in profile.values() if slot["samples"] > 0]
+            populated.sort()
+            median_samples = populated[len(populated) // 2] if populated else 0.0
+            snapshot[profile_key] = {
+                "populated_hours": len(populated),
+                "median_samples": median_samples,
+                "days_estimate": int(median_samples // 4) if len(populated) >= 6 else 0,
+                "samples_per_hour": {
+                    str(hour): float(profile[hour]["samples"])
+                    for hour in range(24)
+                    if profile[hour]["samples"] > 0
+                },
+            }
+        return snapshot
+
     @property
     def confidence(self) -> str:
         days = self.days_collected

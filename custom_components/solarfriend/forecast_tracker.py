@@ -1,6 +1,7 @@
 """SolarFriend ForecastTracker — tracks forecast accuracy over time."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -10,7 +11,10 @@ from homeassistant.helpers.storage import Store
 
 from .forecast_adapter import ForecastData, get_forecast_for_period
 
+_LOGGER = logging.getLogger(__name__)
+
 STORAGE_VERSION = 1
+STORAGE_KEY = "solarfriend_forecast_tracker"
 _MIN_VALID_DAY_KWH = 2.0
 _ROLLING_DAYS = 14
 _MAX_HISTORY = 30
@@ -47,7 +51,9 @@ class ForecastTracker:
     """Persists actual vs forecast production history and derives quality metrics."""
 
     def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
-        self._store = Store(hass, STORAGE_VERSION, f"solarfriend_forecast_tracker_{entry_id}")
+        self._hass = hass
+        self._legacy_entry_id = entry_id
+        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.today_date: str = ""
         self.today_actual_kwh: float = 0.0
         self.today_forecast_baseline_kwh: float = 0.0
@@ -55,6 +61,19 @@ class ForecastTracker:
 
     async def async_load(self) -> None:
         data: dict[str, Any] | None = await self._store.async_load()
+        if not data and self._legacy_entry_id:
+            legacy_store = Store(
+                self._hass,
+                STORAGE_VERSION,
+                f"{STORAGE_KEY}_{self._legacy_entry_id}",
+            )
+            data = await legacy_store.async_load()
+            if data:
+                _LOGGER.info(
+                    "ForecastTracker migrated legacy storage for entry_id=%s to stable key",
+                    self._legacy_entry_id,
+                )
+                await self._store.async_save(data)
         if not data:
             return
         self.today_date = str(data.get("today_date", ""))
