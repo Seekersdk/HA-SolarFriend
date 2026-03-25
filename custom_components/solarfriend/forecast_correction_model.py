@@ -55,6 +55,8 @@ class ForecastCorrectionModel:
         self._today_actual_kwh_by_hour: dict[int, float] = {}
         self._today_raw_forecast_kwh_by_hour: dict[int, float] = {}
         self._finalized_hours: set[int] = set()
+        self._today_sunrise: datetime | None = None
+        self._today_sunset: datetime | None = None
 
     async def async_load(self) -> None:
         """Load persisted buckets and current-day partial data."""
@@ -96,6 +98,8 @@ class ForecastCorrectionModel:
             int(hour)
             for hour in (data.get("finalized_hours", []) or [])
         }
+        self._today_sunrise = self._parse_datetime(data.get("today_sunrise"))
+        self._today_sunset = self._parse_datetime(data.get("today_sunset"))
 
     async def async_save(self) -> None:
         """Persist buckets and current-day partial state."""
@@ -122,6 +126,8 @@ class ForecastCorrectionModel:
                     for hour, value in self._today_raw_forecast_kwh_by_hour.items()
                 },
                 "finalized_hours": sorted(self._finalized_hours),
+                "today_sunrise": self._today_sunrise.isoformat() if self._today_sunrise else None,
+                "today_sunset": self._today_sunset.isoformat() if self._today_sunset else None,
             }
         )
 
@@ -139,6 +145,8 @@ class ForecastCorrectionModel:
         self._rollover_if_needed(now.date(), sunrise, sunset)
 
         self._today_date = now.date().isoformat()
+        self._today_sunrise = sunrise
+        self._today_sunset = sunset
         self._update_forecast_map(now.date(), hourly_forecast)
 
         if dt_seconds > 0 and pv_power_w > 0:
@@ -218,12 +226,14 @@ class ForecastCorrectionModel:
         for hour in range(24):
             if hour in self._finalized_hours:
                 continue
-            self._finalize_hour(previous_date, hour, sunrise, sunset)
+            self._finalize_hour(previous_date, hour, self._today_sunrise, self._today_sunset)
 
         self._today_date = today.isoformat()
         self._today_actual_kwh_by_hour = {}
         self._today_raw_forecast_kwh_by_hour = {}
         self._finalized_hours = set()
+        self._today_sunrise = sunrise
+        self._today_sunset = sunset
 
     def _update_forecast_map(self, current_date: date, hourly_forecast: list[dict[str, Any]] | None) -> None:
         if not hourly_forecast:
@@ -337,3 +347,14 @@ class ForecastCorrectionModel:
             return 1.0
         confidence = min(1.0, max(0.0, (bucket.samples - _MIN_EARLY_SAMPLES + 1) / (_MIN_CONFIDENT_SAMPLES - _MIN_EARLY_SAMPLES + 1)))
         return 1.0 + (bucket.factor - 1.0) * confidence
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
