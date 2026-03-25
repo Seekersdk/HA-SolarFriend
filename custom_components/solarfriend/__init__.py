@@ -9,7 +9,12 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN, SERVICE_POPULATE_LOAD_MODEL
+from .const import (
+    CONF_BUY_PRICE_SENSOR,
+    CONF_SELL_PRICE_SENSOR,
+    DOMAIN,
+    SERVICE_POPULATE_LOAD_MODEL,
+)
 from .coordinator import SolarFriendCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,6 +58,15 @@ async def _cleanup_orphaned_ev_entities(hass: HomeAssistant, entry: ConfigEntry)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Create coordinator, do first refresh, forward to platforms."""
+    legacy_price_sensor = entry.data.get("price_sensor")
+    if legacy_price_sensor and (
+        CONF_BUY_PRICE_SENSOR not in entry.data or CONF_SELL_PRICE_SENSOR not in entry.data
+    ):
+        new_data = dict(entry.data)
+        new_data.setdefault(CONF_BUY_PRICE_SENSOR, legacy_price_sensor)
+        new_data.setdefault(CONF_SELL_PRICE_SENSOR, legacy_price_sensor)
+        hass.config_entries.async_update_entry(entry, data=new_data)
+
     await _cleanup_orphaned_ev_entities(hass, entry)
     coordinator = SolarFriendCoordinator(hass, entry)
     await coordinator.async_startup()

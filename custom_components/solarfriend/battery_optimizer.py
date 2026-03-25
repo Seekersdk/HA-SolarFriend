@@ -369,6 +369,7 @@ class BatteryOptimizer:
         is_weekend: bool,
         hourly_forecast: list | None = None,
         reserved_solar_kwh: dict[datetime, float] | None = None,
+        raw_sell_prices: list[dict[str, Any]] | None = None,
     ) -> OptimizeResult:
         """Main entry point called by the coordinator.
 
@@ -387,8 +388,14 @@ class BatteryOptimizer:
 
         # ── Anti-eksport: negativ/nul spotpris ────────────────────────────
         current_price = get_current_price_from_raw(raw_prices, now, fallback=0.0) or 0.0
+        sell_prices = raw_sell_prices if raw_sell_prices is not None else raw_prices
+        sell_price = (
+            get_current_price_from_raw(sell_prices, now, fallback=current_price)
+            if sell_prices
+            else current_price
+        ) or current_price
 
-        if current_price <= 0 and raw_prices:
+        if sell_price <= 0 and sell_prices:
             self._last_plan = self._build_horizon_plan(
                 now=now,
                 current_soc=current_soc,
@@ -399,7 +406,7 @@ class BatteryOptimizer:
             )
             return OptimizeResult(
                 strategy="ANTI_EXPORT",
-                reason=f"Negativ/nul pris ({current_price:.4f} kr/kWh) — solar sell OFF",
+                reason=f"Negativ/nul salgspris ({sell_price:.4f} kr/kWh) — solar sell OFF",
                 target_soc=None,
                 charge_now=False,
                 cheapest_charge_hour=None,
@@ -489,7 +496,7 @@ class BatteryOptimizer:
             solar_remaining = get_forecast_for_period(hourly_forecast, now, sunset_time)
             solar_next_2h = get_forecast_for_period(hourly_forecast, now, now + timedelta(hours=2))
 
-        if current_price > 0:
+        if sell_price > 0:
             reserve_buffer_kwh = 0.5
             cur = now.replace(minute=0, second=0, microsecond=0)
             load_until_sunset_kwh = 0.0
@@ -519,17 +526,17 @@ class BatteryOptimizer:
                 available_kwh,
                 max(0.0, available_kwh + future_recharge_kwh - load_until_solar_kwh - reserve_buffer_kwh),
             )
-            net_gain = sellable_kwh * (current_price - weighted_cost)
+            net_gain = sellable_kwh * (sell_price - weighted_cost)
             if (
                 sellable_kwh > 0.5
                 and future_recharge_kwh > 0.5
                 and net_gain > self.min_charge_saving
-                and current_price > weighted_cost + self.min_charge_saving
+                and sell_price > weighted_cost + self.min_charge_saving
             ):
                 return OptimizeResult(
                     strategy="SELL_BATTERY",
                     reason=(
-                        f"Sælger {sellable_kwh:.1f} kWh til {current_price:.2f} kr — "
+                        f"Sælger {sellable_kwh:.1f} kWh til {sell_price:.2f} kr — "
                         f"forventet genladning {future_recharge_kwh:.1f} kWh"
                     ),
                     target_soc=float(self.battery_min_soc),

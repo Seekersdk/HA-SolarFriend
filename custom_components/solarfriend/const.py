@@ -3,6 +3,8 @@
 DOMAIN = "solarfriend"
 MQTT_BASE_TOPIC = "deye/sensor"
 SERVICE_POPULATE_LOAD_MODEL = "populate_load_model"
+CONF_BUY_PRICE_SENSOR = "buy_price_sensor"
+CONF_SELL_PRICE_SENSOR = "sell_price_sensor"
 
 CONF_MQTT_TOPIC_PREFIX = "topic_prefix"
 DEFAULT_MQTT_TOPIC_PREFIX = "deye/sensor"

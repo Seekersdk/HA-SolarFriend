@@ -22,7 +22,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
 )
 
-from .const import DOMAIN
+from .const import CONF_BUY_PRICE_SENSOR, CONF_SELL_PRICE_SENSOR, DOMAIN
 
 # Config entry keys
 CONF_PV_POWER_SENSOR = "pv_power_sensor"
@@ -31,7 +31,6 @@ CONF_GRID_POWER_SENSOR = "grid_power_sensor"
 CONF_BATTERY_SOC_SENSOR = "battery_soc_sensor"
 CONF_BATTERY_POWER_SENSOR = "battery_power_sensor"
 CONF_LOAD_POWER_SENSOR = "load_power_sensor"
-CONF_PRICE_SENSOR = "price_sensor"
 CONF_FORECAST_SENSOR = "forecast_sensor"
 CONF_BATTERY_CAPACITY = "battery_capacity_kwh"
 CONF_BATTERY_MIN_SOC = "battery_min_soc"
@@ -312,12 +311,13 @@ def _get_sensors_by_device_class(
 
 
 def _get_spot_price_sensors(hass: HomeAssistant) -> dict[str, str]:
-    """Return sensors that look like a spot-price feed (e.g. Energi Data Service).
+    """Return Energi Data Service spot-price sensors only.
 
-    All three criteria must be met:
+    All criteria must be met:
     - device_class == "monetary"
     - unit_of_measurement ends with "/kWh" (e.g. "DKK/kWh", "EUR/kWh")
-    - state attributes contain "raw_today" (distinguishes EDS from other monetary sensors)
+    - state attributes contain "raw_today"
+    - attribution or entity metadata identifies Energi Data Service
     """
     registry = er.async_get(hass)
     result: dict[str, str] = {}
@@ -334,6 +334,18 @@ def _get_spot_price_sensors(hass: HomeAssistant) -> dict[str, str]:
         if not unit.endswith("/kWh"):
             continue
         if "raw_today" not in state.attributes:
+            continue
+        attribution = str(state.attributes.get("attribution", "")).lower()
+        name_haystack = " ".join(
+            part for part in (
+                entity.entity_id,
+                state.attributes.get("friendly_name"),
+                entity.name,
+                entity.original_name,
+            )
+            if part
+        ).lower()
+        if "energi data service" not in attribution and "energi_data_service" not in name_haystack:
             continue
         name = state.attributes.get("friendly_name") or entity.entity_id
         result[entity.entity_id] = f"{name} ({entity.entity_id})"
@@ -739,7 +751,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_BATTERY_CAPACITY): NumberSelector(
+                vol.Required(CONF_BATTERY_CAPACITY, default=10): NumberSelector(
                     NumberSelectorConfig(min=1, max=100, step=0.5, unit_of_measurement="kWh", mode=NumberSelectorMode.BOX)
                 ),
                 vol.Required(CONF_BATTERY_MIN_SOC, default=10): NumberSelector(
@@ -780,7 +792,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_BATTERY_PRICE, default=15000): NumberSelector(
                     NumberSelectorConfig(min=1000, max=200000, step=500, unit_of_measurement="kr", mode=NumberSelectorMode.BOX)
                 ),
-                vol.Required(CONF_BATTERY_CYCLES, default=4000): NumberSelector(
+                vol.Required(CONF_BATTERY_CYCLES, default=8000): NumberSelector(
                     NumberSelectorConfig(min=1000, max=20000, step=100, mode=NumberSelectorMode.BOX)
                 ),
                 vol.Required(CONF_MIN_CHARGE_SAVING, default=0.20): NumberSelector(
@@ -820,9 +832,29 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             self._data.update(user_input)
             return await self.async_step_forecast_type()
 
+        buy_default = None
+        sell_default = None
+        for entity_id in price_sensors:
+            state = self.hass.states.get(entity_id)
+            if state is None:
+                continue
+            if state.attributes.get("tariffs"):
+                buy_default = entity_id
+            else:
+                sell_default = entity_id
+
+        if buy_default is None and price_sensors:
+            buy_default = next(iter(price_sensors))
+        if sell_default is None:
+            sell_default = next(
+                (entity_id for entity_id in price_sensors if entity_id != buy_default),
+                buy_default,
+            )
+
         schema = vol.Schema(
             {
-                vol.Required(CONF_PRICE_SENSOR): vol.In(price_sensors),
+                vol.Required(CONF_BUY_PRICE_SENSOR, default=buy_default): vol.In(price_sensors),
+                vol.Required(CONF_SELL_PRICE_SENSOR, default=sell_default): vol.In(price_sensors),
             }
         )
 

@@ -53,10 +53,11 @@
         }
       },
       "price_sensor": {
-        "title": "Vælg prissensor",
-        "description": "Vælg en sensor med aktuel elspotpris.",
+        "title": "Vælg elpriser",
+        "description": "Vælg én sensor til købspris og én til salgspris. Købspris bruges til opladning og besparelser, salgspris bruges til eksport/salg.",
         "data": {
-          "price_sensor": "Elprissensor"
+          "buy_price_sensor": "Købspris-sensor",
+          "sell_price_sensor": "Salgspris-sensor"
         }
       },
       "forecast_type": {

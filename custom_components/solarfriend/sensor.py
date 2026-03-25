@@ -76,6 +76,11 @@ def _battery_plan_attrs(d: "SolarFriendData", cfg: dict) -> dict:
     }
 
 
+def _plan_metrics_result(d: "SolarFriendData"):
+    """Return the optimizer result that matches the current battery plan snapshot."""
+    return d.plan_optimize_result if d.battery_plan and d.plan_optimize_result else d.optimize_result
+
+
 def _forecast_accuracy_14d_attrs(d: "SolarFriendData", cfg: dict) -> dict:
     """Expose rolling forecast quality details."""
     return {
@@ -317,17 +322,17 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         icon="mdi:brain",
         value_fn=lambda d, _: (
             "Anti-eksport (negativ pris)"
-            if d.optimize_result and d.optimize_result.strategy == "ANTI_EXPORT"
-            else (d.optimize_result.strategy if d.optimize_result else "IDLE")
+            if _plan_metrics_result(d) and _plan_metrics_result(d).strategy == "ANTI_EXPORT"
+            else (_plan_metrics_result(d).strategy if _plan_metrics_result(d) else "IDLE")
         ),
         extra_attrs_fn=lambda d, _: (
             {
-                "reason": d.optimize_result.reason,
-                "charge_now": d.optimize_result.charge_now,
-                "target_soc": d.optimize_result.target_soc,
-                "best_discharge_hours": d.optimize_result.best_discharge_hours,
+                "reason": _plan_metrics_result(d).reason,
+                "charge_now": _plan_metrics_result(d).charge_now,
+                "target_soc": _plan_metrics_result(d).target_soc,
+                "best_discharge_hours": _plan_metrics_result(d).best_discharge_hours,
             }
-            if d.optimize_result
+            if _plan_metrics_result(d)
             else None
         ),
     ),
@@ -340,8 +345,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         state_class=None,
         icon="mdi:piggy-bank",
         value_fn=lambda d, _: (
-            round(d.optimize_result.expected_saving_dkk, 2)
-            if d.optimize_result
+            round(_plan_metrics_result(d).expected_saving_dkk, 2)
+            if _plan_metrics_result(d)
             else 0.0
         ),
     ),
@@ -353,8 +358,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         state_class=None,
         icon="mdi:weather-sunset-up",
         value_fn=lambda d, _: (
-            round(d.optimize_result.morning_need_kwh, 2)
-            if d.optimize_result
+            round(_plan_metrics_result(d).morning_need_kwh, 2)
+            if _plan_metrics_result(d)
             else 0.0
         ),
     ),
@@ -366,8 +371,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         state_class=None,
         icon="mdi:battery-charging",
         value_fn=lambda d, _: (
-            round(d.optimize_result.night_charge_kwh, 2)
-            if d.optimize_result
+            round(_plan_metrics_result(d).night_charge_kwh, 2)
+            if _plan_metrics_result(d)
             else 0.0
         ),
     ),
@@ -379,8 +384,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         state_class=None,
         icon="mdi:clock-outline",
         value_fn=lambda d, _: (
-            d.optimize_result.cheapest_charge_hour or "N/A"
-            if d.optimize_result
+            _plan_metrics_result(d).cheapest_charge_hour or "N/A"
+            if _plan_metrics_result(d)
             else "N/A"
         ),
     ),
@@ -392,8 +397,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:battery-arrow-up",
         value_fn=lambda d, _: (
-            d.optimize_result.target_soc or 0
-            if d.optimize_result
+            _plan_metrics_result(d).target_soc or 0
+            if _plan_metrics_result(d)
             else 0
         ),
     ),

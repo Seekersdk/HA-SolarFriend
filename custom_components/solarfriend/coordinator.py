@@ -29,7 +29,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as ha_dt
 
-from .const import DOMAIN
+from .const import CONF_BUY_PRICE_SENSOR, CONF_SELL_PRICE_SENSOR, DOMAIN
 from .consumption_profile import ConsumptionProfile
 from .battery_tracker import BatteryTracker
 from .battery_optimizer import (
@@ -40,7 +40,7 @@ from .battery_optimizer import (
 from .forecast_adapter import ForecastAdapter, ForecastData, get_forecast_for_period
 from .forecast_correction_model import ForecastCorrectionModel
 from .forecast_tracker import ForecastTracker
-from .price_adapter import PriceAdapter, PriceData
+from .price_adapter import PriceAdapter, PriceData, get_current_price_from_raw
 from .inverter_controller import InverterController
 from .ev_charger_controller import EVChargerController
 from .vehicle_controller import VehicleController
@@ -105,8 +105,10 @@ class SolarFriendData:
     battery_power: float = 0.0
     load_power: float = 0.0
     price: float = 0.0
+    sell_price: float = 0.0
     forecast: float = 0.0
     price_data: PriceData | None = None
+    sell_price_data: PriceData | None = None
 
     # Derived values
     solar_surplus: float = 0.0
@@ -124,6 +126,7 @@ class SolarFriendData:
 
     # Optimizer result (None until first run)
     optimize_result: OptimizeResult | None = None
+    plan_optimize_result: OptimizeResult | None = None
 
     # Forecast data snapshot (None until first optimizer run)
     forecast_data: ForecastData | None = None
@@ -235,6 +238,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self.config_entry = entry  # public alias for use by entity unique_ids
         self._price_history: list[float] = []
         self._night_prices: dict[int, float] = {}  # hour → min price seen this night
+        self._cached_buy_price_data: PriceData | None = None
+        self._cached_sell_price_data: PriceData | None = None
         self._profile = ConsumptionProfile()
         self._last_profile_update: datetime | None = None
 
@@ -259,12 +264,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         # Optimizer state
         self._last_optimize_dt: datetime | None = None
         self._last_optimize_soc: float | None = None
+        self._last_plan_optimize_result: OptimizeResult | None = None
         self._active_strategy_since: datetime | None = None
         self._active_strategy_reference_pv: float = 0.0
         self._pending_strategy: str | None = None
         self._pending_strategy_count: int = 0
         self._last_plan_deviation_key: str | None = None
-        self._shadow_log_enabled: bool = bool(entry.data.get("shadow_log_enabled", True))
+        self._shadow_log_enabled: bool = bool(entry.data.get("shadow_log_enabled", False))
         self._shadow_logger = ShadowLogger(
             entry=entry,
             profile=self._profile,
@@ -526,7 +532,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         cfg = self._entry.data
         watch_entities: list[str] = []
 
-        for key in ("price_sensor", "forecast_sensor"):
+        for key in (CONF_BUY_PRICE_SENSOR, CONF_SELL_PRICE_SENSOR, "price_sensor", "forecast_sensor"):
             eid = cfg.get(key, "")
             if eid:
                 watch_entities.append(eid)
@@ -644,8 +650,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         # ── Raw prices from Energi Data Service / Nordpool sensor ──────────
         raw_prices = self.data.price_data.to_legacy_raw_prices() if self.data.price_data else []
+        raw_sell_prices = (
+            self.data.sell_price_data.to_legacy_raw_prices()
+            if self.data.sell_price_data
+            else list(raw_prices)
+        )
 
-        # Fallback to night-price history when sensor has no attribute list
+        # Last-resort fallback when no actual price snapshot is available
         if not raw_prices:
             raw_prices = [{"hour": h, "price": p} for h, p in self._night_prices.items()]
             if self.data.price > 0:
@@ -743,6 +754,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             load_power=load_power,
             current_soc=current_soc,
             raw_prices=raw_prices,
+            raw_sell_prices=raw_sell_prices,
             forecast_today_kwh=forecast_today,
             forecast_tomorrow_kwh=forecast_tomorrow,
             sunrise_time=sunrise,
@@ -764,6 +776,9 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._last_optimize_soc = current_soc
 
         self.data.optimize_result = selected_result
+        if self._optimizer.get_last_plan():
+            self._last_plan_optimize_result = selected_result
+            self.data.plan_optimize_result = selected_result
 
         if selected_result.strategy == "ANTI_EXPORT":
             _LOGGER.warning(
@@ -813,6 +828,47 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         if self.data and self.data.price_data is not None:
             return self.data.price_data.to_legacy_raw_prices()
         return []
+
+    def _trim_price_snapshot(self, snapshot: PriceData, now: datetime) -> PriceData | None:
+        """Return a forward-looking price snapshot with past hours removed."""
+        raw_prices = snapshot.to_legacy_raw_prices()
+        current_hour = _normalize_local_datetime(now).replace(minute=0, second=0, microsecond=0)
+        points = [point for point in snapshot.points if point.end > current_hour]
+        current_price = get_current_price_from_raw(raw_prices, now, fallback=snapshot.current_price)
+
+        if current_price is None and not points:
+            return None
+
+        return PriceData(
+            points=points,
+            current_price=current_price,
+            source_entity=snapshot.source_entity,
+        )
+
+    def _resolve_price_snapshot(
+        self,
+        now: datetime,
+        cache_kind: str,
+        fresh_snapshot: PriceData | None,
+    ) -> PriceData | None:
+        """Prefer fresh actual prices, otherwise fall back to the last valid snapshot."""
+        cache_attr = "_cached_sell_price_data" if cache_kind == "sell" else "_cached_buy_price_data"
+        if fresh_snapshot is not None:
+            trimmed_fresh = self._trim_price_snapshot(fresh_snapshot, now)
+            if trimmed_fresh is not None:
+                setattr(self, cache_attr, trimmed_fresh)
+                return trimmed_fresh
+
+        cached_snapshot = getattr(self, cache_attr)
+        if cached_snapshot is None:
+            return None
+
+        trimmed_cached = self._trim_price_snapshot(cached_snapshot, now)
+        if trimmed_cached is None:
+            return None
+
+        setattr(self, cache_attr, trimmed_cached)
+        return trimmed_cached
 
     def _forecast_kwh_between(self, from_dt: datetime, to_dt: datetime) -> float:
         """Return forecast kWh in a time window from the current snapshot."""
@@ -1112,6 +1168,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         # Carry over optimizer + forecast results between polling cycles
         if prev_data is not None:
             data.optimize_result = prev_data.optimize_result
+            data.plan_optimize_result = prev_data.plan_optimize_result
             data.forecast_data   = prev_data.forecast_data
 
         sensor_map: dict[str, str] = {
@@ -1139,12 +1196,30 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         now = ha_dt.now()
 
-        price_snapshot = PriceAdapter.from_hass(self.hass, cfg.get("price_sensor"))
+        buy_price_sensor = cfg.get(CONF_BUY_PRICE_SENSOR) or cfg.get("price_sensor")
+        sell_price_sensor = cfg.get(CONF_SELL_PRICE_SENSOR) or buy_price_sensor
+
+        price_snapshot = self._resolve_price_snapshot(
+            now,
+            "buy",
+            PriceAdapter.from_hass(self.hass, buy_price_sensor),
+        )
         if price_snapshot is None or price_snapshot.current_price is None:
             unavailable.append("price")
         else:
             data.price_data = price_snapshot
             data.price = price_snapshot.current_price
+
+        sell_price_snapshot = self._resolve_price_snapshot(
+            now,
+            "sell",
+            PriceAdapter.from_hass(self.hass, sell_price_sensor),
+        )
+        if sell_price_snapshot is None or sell_price_snapshot.current_price is None:
+            unavailable.append("sell_price")
+        else:
+            data.sell_price_data = sell_price_snapshot
+            data.sell_price = sell_price_snapshot.current_price
 
         forecast_snapshot = await ForecastAdapter.from_hass(
             hass=self.hass,
@@ -1340,8 +1415,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             )
             # Pull back whatever the optimizer wrote
             data.optimize_result = self.data.optimize_result if self.data else data.optimize_result
+            data.plan_optimize_result = (
+                self.data.plan_optimize_result if self.data else data.plan_optimize_result
+            )
 
         data.battery_plan = self._build_battery_plan(data, now)
+        if data.battery_plan and self._last_plan_optimize_result is not None:
+            data.plan_optimize_result = self._last_plan_optimize_result
 
         # ── EV charging ───────────────────────────────────────────────────
         if self._ev_enabled:

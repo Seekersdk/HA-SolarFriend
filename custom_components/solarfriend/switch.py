@@ -88,7 +88,7 @@ class SolarFriendShadowLogSwitch(RestoreEntity, SwitchEntity):
     def __init__(self, coordinator: SolarFriendCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
         self._entry = entry
-        self._is_on = bool(entry.data.get("shadow_log_enabled", True))
+        self._is_on = bool(entry.data.get("shadow_log_enabled", False))
         self._attr_unique_id = f"{entry.entry_id}_shadow_log"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
