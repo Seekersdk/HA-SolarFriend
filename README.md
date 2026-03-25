@@ -1,80 +1,149 @@
-# SolarFriend WIP🌞
+# SolarFriend
 
-This project is under development. There will be bugs and is not meant for production
+SolarFriend is a Home Assistant integration for energy-aware battery and EV charging control.
 
-Smart solar battery optimization for Home Assistant.
-Automatically manages battery charging and discharging based on
-spot prices, solar forecasts and your consumption patterns.
+It combines live power data, spot prices, solar forecasts, and a learned household consumption profile to make short-horizon decisions inside Home Assistant. The integration is designed to keep the current state actionable, explainable, and visible in dashboards.
 
-## Features
+## What the integration does
 
-- **Spot price optimization** — charges battery when electricity
-  is cheap, uses battery when it's expensive
-- **Solcast integration** — uses solar forecasts to plan ahead
-- **Consumption profiling** — learns your usage patterns over 28 days
-- **Pre-emptive discharge** — empties battery before solar peaks
-  so you maximize free solar energy
-- **Deye/klatremis support** — controls Deye inverters directly
+### Home battery optimization
 
-## Strategies
+SolarFriend plans the home battery across the full known price horizon instead of splitting decisions into simple day/night rules.
 
-| Strategy | When | Action |
-|----------|------|--------|
-| `CHARGE_NIGHT` | Night, low price | Charge battery at cheapest hour |
-| `SAVE_SOLAR` | Day, solar incoming | Reserve capacity for solar |
-| `USE_BATTERY` | Day, high price | Use battery instead of grid |
-| `SELL_BATTERY` | Day, high price + solar coming | Sell battery, recharge with solar |
-| `CHARGE_GRID` | Any, very cheap price | Opportunistic grid charge |
-| `IDLE` | Default | No intervention |
+It can:
 
-## Requirements
+- charge from grid in cheap hours when that improves later savings
+- save battery energy for higher-value hours later in the horizon
+- avoid unnecessary discharge in low-value hours
+- account for expected solar production and household demand
+- respond to negative or zero-price conditions
+- re-optimize when the battery does not follow the currently planned slot
 
-- Home Assistant 2024.1+
-- Solcast PV Forecast (recommended) or Forecast.Solar
-- Energi Data Service or similar spot price sensor
-- Deye inverter with klatremis YAML (for inverter control)
+The battery planner uses:
+
+- current battery state of charge
+- live battery, grid, PV, and load power
+- hourly spot prices
+- hourly solar forecast
+- learned hourly household demand
+- weighted battery energy cost from tracked battery history
+
+### Battery value and savings tracking
+
+SolarFriend keeps track of what is stored in the battery and where that energy came from.
+
+It tracks:
+
+- solar-charged energy in the battery
+- grid-charged energy in the battery
+- weighted battery energy cost
+- daily and total solar savings
+- daily and total optimizer savings
+
+The total savings sensors update live and persist across restarts.
+
+### Learned household consumption profile
+
+The integration builds a household demand model from measured load data.
+
+It includes:
+
+- hourly weekday/weekend buckets
+- live learning from current measurements
+- historical seeding from recorder history
+- force-populate support from existing load history
+- confidence reporting for the learned model
+
+This profile is used by the battery optimizer and by EV planning.
+
+### Forecast quality tracking
+
+SolarFriend tracks forecast quality over time and exposes diagnostics for:
+
+- today versus predicted production
+- yesterday versus predicted production
+- rolling 14-day accuracy
+- rolling 14-day bias
+- rolling forecast error metrics
+
+It also includes a passive month/hour forecast correction model that learns how forecast output differs from actual production throughout the year. This model is currently diagnostics-only and does not modify live control behavior.
+
+### EV charging optimization
+
+SolarFriend also supports optional EV charging control.
+
+It includes three charging modes:
+
+- `solar_only`: use real-time surplus solar only
+- `hybrid`: combine expected solar with the cheapest grid hours before departure
+- `grid_schedule`: charge in the cheapest slots before departure
+
+The EV planner uses slot-based logic and can consider:
+
+- charger power limits
+- solar surplus available to the car
+- planned home battery charging
+- departure time
+- target state of charge
+- minimum range
+
+When both the EV and the home battery want the same solar energy, SolarFriend can prioritize one over the other based on timing and economic value.
+
+## Main entities and diagnostics
+
+The integration exposes live state, planning data, and diagnostics for use in dashboards and automations.
+
+Examples include:
+
+- current optimizer strategy
+- battery plan preview
+- EV charging strategy and reason
+- learned consumption profile chart
+- forecast SOC chart
+- solar next 2 hours
+- solar until sunset
+- daily and total savings
+- forecast quality metrics
+- forecast correction model status
+
+## Logging and analysis
+
+SolarFriend includes structured shadow logging for replay and analysis of optimizer behavior.
+
+It also includes a dedicated forecast correction dashboard file:
+
+- `ForecastCorrectionBoard.yaml`
+
+This is intended as a diagnostic/debug dashboard for monitoring the passive forecast correction model.
 
 ## Installation
 
-### HACS (recommended)
-1. Add this repo as a custom repository in HACS
-2. Install "SolarFriend"
-3. Restart Home Assistant
-4. Settings → Integrations → Add Integration → SolarFriend
+### HACS
+
+1. Add this repository as a custom repository in HACS.
+2. Install `SolarFriend`.
+3. Restart Home Assistant.
+4. Add the `SolarFriend` integration from Settings → Devices & Services.
 
 ### Manual
-Copy `custom_components/solarfriend/` to your HA
-`config/custom_components/` and restart.
+
+Copy `custom_components/solarfriend/` into your Home Assistant `custom_components/` directory and restart Home Assistant.
 
 ## Configuration
 
-Setup via UI — you will need:
-1. Inverter sensors (PV, grid, battery SOC, battery power, load)
-2. Battery settings (capacity kWh, min/max SOC, cost per kWh)
-3. Spot price sensor
-4. Solcast or Forecast.Solar sensor
-5. Deye klatremis control entities (optional)
+The integration is configured through the Home Assistant UI.
 
-## Key Sensors
+Typical inputs include:
 
-| Sensor | Description |
-|--------|-------------|
-| `sensor.solarfriend_optimizer_strategy` | Current strategy |
-| `sensor.solarfriend_battery_soc` | Battery state of charge |
-| `sensor.solarfriend_forecast_today` | Solar forecast today (kWh) |
-| `sensor.solarfriend_solar_next_2_hours` | Solar forecast next 2h |
-| `sensor.solarfriend_sparet_pa_sol_i_dag` | Money saved by solar today |
-| `sensor.solarfriend_sparet_via_optimering_i_dag` | Money saved by optimization today |
-| `sensor.solarfriend_consumption_profile_chart` | 24h consumption profile |
-| `sensor.solarfriend_forecast_soc_chart` | Predicted SOC for rest of day |
+- PV power sensor
+- grid power sensor
+- battery state of charge sensor
+- battery power sensor
+- household load sensor
+- spot price sensor
+- solar forecast source
 
-## Supported Inverters
-
-| Inverter | Status |
-|----------|--------|
-| Deye SUN-12K (via klatremis) | ✅ Supported |
-| Huawei | 🔜 Planned |
-| Solarman | 🔜 Planned |
+If EV control is enabled, charger and vehicle entities are configured through the same integration flow.
 
 ## License
 
