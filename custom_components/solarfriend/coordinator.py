@@ -695,16 +695,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         sunrise = _normalize_local_datetime(sunrise)
         sunset = _normalize_local_datetime(sunset)
 
-        if ("pv_power" in readings or "pv2_power" in readings) and self._forecast_correction_model is not None:
-            self._forecast_correction_model.update(
-                now=now,
-                pv_power_w=data.pv_power,
-                dt_seconds=0.0 if self._prev_update_time is None else (now - self._prev_update_time).total_seconds(),
-                hourly_forecast=data.forecast_data.hourly_forecast if data.forecast_data else [],
-                sunrise=sunrise,
-                sunset=sunset,
-            )
-
         battery_soc = self.data.battery_soc
         if battery_soc is None:
             _LOGGER.debug("BatteryOptimizer: skipping — battery_soc not available yet")
