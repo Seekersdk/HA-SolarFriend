@@ -68,6 +68,7 @@ CONF_DEYE_TIME_POINT_1_START   = "deye_time_point_1_start"
 CONF_DEYE_TIME_POINT_1_CAPACITY = "deye_time_point_1_capacity"
 CONF_DEYE_GRID_CHARGE_CURRENT  = "deye_grid_charge_current"
 CONF_DEYE_ENERGY_PRIORITY      = "deye_energy_priority"
+CONF_DEYE_LIMIT_CONTROL_MODE   = "deye_limit_control_mode"
 CONF_SOLAR_SELL_ENTITY         = "solar_sell_entity"
 
 DEFAULT_NAME = "SolarFriend"
@@ -88,11 +89,12 @@ _KLATREMIS_SENSOR_SUFFIXES: dict[str, list[str]] = {
 _KLATREMIS_CONTROL_SUFFIXES: dict[str, tuple[str, list[str]]] = {
     CONF_DEYE_GRID_CHARGE_SWITCH:    ("switch", ["_grid_charge"]),
     CONF_DEYE_TIME_OF_USE_SWITCH:    ("switch", ["_time_of_use"]),
-    CONF_DEYE_TIME_POINT_1_ENABLE:   ("switch", ["_time_point_1-6_charge_enable"]),
-    CONF_DEYE_TIME_POINT_1_START:    ("number", ["_time_point_1-6_start"]),
-    CONF_DEYE_TIME_POINT_1_CAPACITY: ("number", ["_time_point_1-6_capacity"]),
+    CONF_DEYE_TIME_POINT_1_ENABLE:   ("switch", ["_time_point_1_charge_enable", "_time_point_1-6_charge_enable"]),
+    CONF_DEYE_TIME_POINT_1_START:    ("number", ["_time_point_1_start", "_time_point_1-6_start"]),
+    CONF_DEYE_TIME_POINT_1_CAPACITY: ("number", ["_time_point_1_capacity", "_time_point_1-6_capacity"]),
     CONF_DEYE_GRID_CHARGE_CURRENT:   ("number", ["_maximum_battery_grid_charge_current", "_grid_charge_current"]),
     CONF_DEYE_ENERGY_PRIORITY:       ("select", ["_energy_priority"]),
+    CONF_DEYE_LIMIT_CONTROL_MODE:    ("select", ["_limit_control_mode"]),
 }
 
 # (device_class, name keywords) used as broad fallback for unknown integrations
@@ -898,15 +900,23 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             guess = guesses.get(conf_key)
             return vol.Optional(conf_key, default=guess) if guess in number_entities else vol.Optional(conf_key)
 
-        # Filter selects to only energy_priority candidates; fall back to all if none
+        # Filter selects to likely Deye select entities; fall back to all if none
         priority_entities = {
             eid: label for eid, label in select_entities.items()
             if eid.endswith("_energy_priority")
+        } or select_entities
+        limit_mode_entities = {
+            eid: label for eid, label in select_entities.items()
+            if eid.endswith("_limit_control_mode")
         } or select_entities
 
         def _opt_select(conf_key: str) -> vol.Optional:
             guess = guesses.get(conf_key)
             return vol.Optional(conf_key, default=guess) if guess in priority_entities else vol.Optional(conf_key)
+
+        def _opt_limit_select(conf_key: str) -> vol.Optional:
+            guess = guesses.get(conf_key)
+            return vol.Optional(conf_key, default=guess) if guess in limit_mode_entities else vol.Optional(conf_key)
 
         # All switches for the optional solar_sell field
         all_switch_entities = (
@@ -932,6 +942,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
                 _opt_number(CONF_DEYE_TIME_POINT_1_CAPACITY): vol.In(number_entities),
                 _opt_number(CONF_DEYE_GRID_CHARGE_CURRENT):   vol.In(number_entities),
                 _opt_select(CONF_DEYE_ENERGY_PRIORITY):       vol.In(priority_entities),
+                _opt_limit_select(CONF_DEYE_LIMIT_CONTROL_MODE): vol.In(limit_mode_entities),
                 _solar_sell_field:                             vol.In(all_switch_entities),
             }
         )
