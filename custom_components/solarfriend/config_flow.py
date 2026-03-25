@@ -524,17 +524,31 @@ async def _detect_kia_entities(
                 break
 
     # --- Target SOC entity (sensor or number) ---
-    target_soc_entity: str | None = None
+    target_soc_candidates: list[tuple[int, str]] = []
     for entry in registry.entities.values():
         if entry.domain not in ("sensor", "number"):
             continue
         eid = entry.entity_id.lower()
         if not any(kw in eid for kw in ("charge_limit", "target_soc", "charging_limit", "ev_charging_current")):
             continue
-        if not any(brand in eid for brand in ("kia", "hyundai")):
+        if not any(brand in eid for brand in ("kia", "hyundai", "niro")):
             continue
-        target_soc_entity = entry.entity_id
-        break
+
+        score = 0
+        if entry.domain == "number":
+            score += 3
+        if "ac_charging_limit" in eid:
+            score += 5
+        elif "dc_charging_limit" in eid:
+            score += 2
+        elif "charge_limit" in eid or "charging_limit" in eid:
+            score += 1
+        if "target_soc" in eid:
+            score += 2
+
+        target_soc_candidates.append((score, entry.entity_id))
+
+    target_soc_entity = max(target_soc_candidates, default=(0, None))[1] if target_soc_candidates else None
 
     # --- Driving range sensor ---
     range_entity: str | None = None
