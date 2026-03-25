@@ -5,6 +5,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from homeassistant.util import dt as ha_dt
+
 from .inverter_controller import InverterController
 
 if TYPE_CHECKING:
@@ -41,6 +43,7 @@ class DeyeController(InverterController):
         self._charge_current  = data.get("deye_grid_charge_current")
         self._energy_priority = data.get("deye_energy_priority")
         self._solar_sell      = data.get("solar_sell_entity", "")
+        self._battery_min_soc = float(data.get("battery_min_soc", 10.0))
 
         self._last_signature: _CommandSignature | None = None
 
@@ -128,23 +131,33 @@ class DeyeController(InverterController):
         )
 
     async def _apply_use_battery(self) -> None:
-        """Discharge battery to supply house load."""
+        """Discharge battery to supply house load via a TOU window."""
+        await self._set_switch(self._time_of_use, True)
+        await self._set_switch(self._tp1_enable, True)
+        await self._set_number(self._tp1_start, self._current_hhmm())
+        await self._set_number(self._tp1_capacity, int(self._battery_min_soc))
         await self._set_select(self._energy_priority, "Load first")
         await self._set_switch(self._grid_charge, False)
-        await self._set_switch(self._time_of_use, False)
 
     async def _apply_sell_battery(self) -> None:
         """Export battery energy to grid — solar will recharge afterwards."""
+        await self._set_switch(self._time_of_use, True)
+        await self._set_switch(self._tp1_enable, True)
+        await self._set_number(self._tp1_start, self._current_hhmm())
+        await self._set_number(self._tp1_capacity, int(self._battery_min_soc))
         await self._set_select(self._energy_priority, "Grid first")
         await self._set_switch(self._grid_charge, False)
-        await self._set_switch(self._time_of_use, False)
         _LOGGER.info(
             "DeyeController: SELL_BATTERY — Grid first aktiveret, batteri aflader til net"
         )
 
     async def _apply_charge_grid(self, result: OptimizeResult) -> None:
-        """Charge now — price is at floor (no time-of-use scheduling needed)."""
+        """Charge now via an immediate TOU window."""
         await self._set_switch(self._grid_charge, True)
+        await self._set_switch(self._time_of_use, True)
+        await self._set_switch(self._tp1_enable, True)
+        await self._set_number(self._tp1_start, self._current_hhmm())
+        await self._set_number(self._tp1_capacity, int(result.target_soc) if result.target_soc else 80)
         await self._set_number(self._charge_current, 25)
         await self._set_select(self._energy_priority, "Battery first")
 
@@ -152,6 +165,7 @@ class DeyeController(InverterController):
         """Neutral state — let Deye manage itself."""
         await self._set_switch(self._grid_charge, False)
         await self._set_switch(self._time_of_use, False)
+        await self._set_switch(self._tp1_enable, False)
         await self._set_select(self._energy_priority, "Load first")
 
     async def _set_solar_sell(self, enabled: bool) -> None:
@@ -198,3 +212,8 @@ class DeyeController(InverterController):
             blocking=True,
         )
         _LOGGER.debug("Deye: %s → %s", entity_id, option)
+
+    @staticmethod
+    def _current_hhmm() -> int:
+        now = ha_dt.now()
+        return now.hour * 100 + now.minute
