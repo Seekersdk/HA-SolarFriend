@@ -4,6 +4,14 @@ SolarFriend is a Home Assistant integration for energy-aware battery and EV char
 
 It combines live power data, spot prices, solar forecasts, and a learned household consumption profile to make short-horizon decisions inside Home Assistant. The integration is designed to keep the current state actionable, explainable, and visible in dashboards.
 
+## Currently supported setup
+
+SolarFriend currently supports the following control stack:
+
+- Deye inverter control via the Klatremis-based Deye setup
+- Kia vehicle integration for EV state and target data
+- Easee charger integration for EV charging control
+
 ## What the integration does
 
 ### Home battery optimization
