@@ -421,15 +421,31 @@ async def _detect_easee_entities(
 ) -> tuple[str | None, str | None, str | None]:
     """Return (status_entity, power_entity, charger_id) for an Easee charger."""
     registry = er.async_get(hass)
-
-    easee_sensors = [
-        e for e in registry.entities.values()
-        if e.domain == "sensor" and "easee" in e.entity_id
-    ]
+    dev_reg = dr.async_get(hass)
 
     status_entity: str | None = None
     power_entity: str | None = None
     charger_id: str | None = None
+
+    easee_device_ids: set[str] = {
+        dev.id
+        for dev in dev_reg.devices.values()
+        if (
+            (dev.manufacturer or "").lower() == "easee"
+            or "easee" in (dev.model or "").lower()
+            or "easee" in (dev.name or "").lower()
+        )
+    }
+
+    easee_sensors = [
+        e
+        for e in registry.entities.values()
+        if e.domain == "sensor"
+        and (
+            e.device_id in easee_device_ids
+            or "easee" in e.entity_id
+        )
+    ]
 
     for entry in easee_sensors:
         state = hass.states.get(entry.entity_id)
@@ -437,19 +453,21 @@ async def _detect_easee_entities(
             continue
         if status_entity is None and state.state in _EASEE_CHARGER_STATES:
             status_entity = entry.entity_id
-            # Try to extract charger_id from pattern sensor.easee_<ID>_status
             eid = entry.entity_id
-            if eid.startswith("sensor.easee_") and eid.endswith("_status"):
-                charger_id = eid[len("sensor.easee_"):-len("_status")]
-            # Fallback: check state attributes
+            if eid.startswith("sensor.") and eid.endswith("_status"):
+                charger_id = eid[len("sensor."):-len("_status")]
             if not charger_id:
                 charger_id = (
                     state.attributes.get("charger_id")
                     or state.attributes.get("id")
                 )
+            if not charger_id and entry.device_id:
+                device = dev_reg.async_get(entry.device_id)
+                if device and device.name:
+                    charger_id = device.name
         if power_entity is None:
             unit = state.attributes.get("unit_of_measurement", "")
-            if unit == "W":
+            if unit in {"W", "kW"} and entry.entity_id.endswith("_power"):
                 power_entity = entry.entity_id
 
     return status_entity, power_entity, charger_id
