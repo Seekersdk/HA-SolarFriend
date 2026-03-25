@@ -92,6 +92,8 @@ SUNSET_OVERRIDE_REMAINING_KWH = 0.25
 #   battery_power > 0  → discharging (leverer strøm)
 #   battery_power < 0  → charging   (modtager strøm)
 _BATTERY_NOISE_W = 50  # ignore changes below this threshold
+_PLAN_DEVIATION_MIN_W = 400.0
+_PLAN_DEVIATION_FRACTION = 0.25
 
 
 @dataclass
@@ -260,6 +262,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._active_strategy_reference_pv: float = 0.0
         self._pending_strategy: str | None = None
         self._pending_strategy_count: int = 0
+        self._last_plan_deviation_key: str | None = None
         self._shadow_log_enabled: bool = bool(entry.data.get("shadow_log_enabled", True))
         self._shadow_logger = ShadowLogger(
             entry=entry,
@@ -598,7 +601,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
     # Optimizer trigger
     # ------------------------------------------------------------------
 
-    async def _trigger_optimize(self, reason: str = "event", *, notify: bool = False) -> None:
+    async def _trigger_optimize(
+        self,
+        reason: str = "event",
+        *,
+        notify: bool = False,
+        force: bool = False,
+    ) -> None:
         """Run BatteryOptimizer if cooldown has elapsed and data is available."""
         if self._optimizer is None:
             _LOGGER.debug("BatteryOptimizer: not ready yet — skipping (%s)", reason)
@@ -617,6 +626,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         now = ha_dt.now()
 
         if (
+            not force
+            and
             self._last_optimize_dt is not None
             and (now - self._last_optimize_dt) < OPTIMIZE_MIN_INTERVAL
         ):
@@ -840,6 +851,74 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
     def _build_battery_plan(self, data: SolarFriendData, now: datetime) -> list[dict[str, Any]]:
         """Return the optimizer's own horizon plan preview."""
         return self._optimizer.get_last_plan()
+
+    def _should_trigger_plan_deviation_replan(
+        self,
+        *,
+        now: datetime,
+        battery_power: float,
+    ) -> bool:
+        """Detect a clear mismatch between planned and actual battery behavior."""
+        if self._optimizer is None:
+            return False
+
+        plan = self._optimizer.get_last_plan()
+        if not plan:
+            self._last_plan_deviation_key = None
+            return False
+
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
+        current_slot = next(
+            (
+                slot for slot in plan
+                if _normalize_local_datetime(datetime.fromisoformat(slot["hour"])).replace(
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                ) == current_hour
+            ),
+            None,
+        )
+        if current_slot is None:
+            self._last_plan_deviation_key = None
+            return False
+
+        planned_discharge_w = float(current_slot.get("discharge_w", 0.0))
+        planned_charge_w = float(current_slot.get("grid_charge_w", 0.0)) + float(
+            current_slot.get("solar_charge_w", 0.0)
+        )
+        actual_discharge_w = max(0.0, battery_power)
+        actual_charge_w = max(0.0, -battery_power)
+
+        deviation_kind: str | None = None
+        if (
+            planned_discharge_w >= _PLAN_DEVIATION_MIN_W
+            and actual_discharge_w < max(_PLAN_DEVIATION_MIN_W, planned_discharge_w * _PLAN_DEVIATION_FRACTION)
+        ):
+            deviation_kind = "missed_discharge"
+        elif (
+            planned_charge_w >= _PLAN_DEVIATION_MIN_W
+            and actual_charge_w < max(_PLAN_DEVIATION_MIN_W, planned_charge_w * _PLAN_DEVIATION_FRACTION)
+        ):
+            deviation_kind = "missed_charge"
+
+        if deviation_kind is None:
+            self._last_plan_deviation_key = None
+            return False
+
+        deviation_key = f"{current_slot['hour']}|{deviation_kind}"
+        if deviation_key == self._last_plan_deviation_key:
+            return False
+
+        self._last_plan_deviation_key = deviation_key
+        _LOGGER.info(
+            "Battery plan deviation detected: %s planned=%.0fW actual_battery=%.0fW slot=%s",
+            deviation_kind,
+            planned_discharge_w if deviation_kind == "missed_discharge" else planned_charge_w,
+            battery_power,
+            current_slot["hour_str"],
+        )
+        return True
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
@@ -1241,14 +1320,22 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                         pass
 
         # ── Hourly optimizer fallback ─────────────────────────────────────
+        should_run_deviation = self._should_trigger_plan_deviation_replan(
+            now=now,
+            battery_power=data.battery_power,
+        )
         should_run_hourly = (
             self._last_optimize_dt is None
             or (now - self._last_optimize_dt) >= timedelta(hours=1)
         )
-        if should_run_hourly:
+        if should_run_deviation or should_run_hourly:
             # Temporarily expose the new data so _trigger_optimize can read it
             self.data = data  # type: ignore[assignment]
-            await self._trigger_optimize("hourly-fallback", notify=False)
+            await self._trigger_optimize(
+                "plan-deviation" if should_run_deviation else "hourly-fallback",
+                notify=False,
+                force=should_run_deviation,
+            )
             # Pull back whatever the optimizer wrote
             data.optimize_result = self.data.optimize_result if self.data else data.optimize_result
 
