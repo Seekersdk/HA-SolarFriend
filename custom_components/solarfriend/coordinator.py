@@ -1132,6 +1132,22 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             return "CHEAP"
         return "NORMAL"
 
+    def _load_sensor_is_total_load(self) -> bool:
+        """Return True when the configured load sensor is a whole-site total load."""
+        entity_id = str(self._entry.data.get("load_power_sensor", "")).lower()
+        return any(token in entity_id for token in ("load_totalpower", "totalpower", "total_load"))
+
+    def _clean_live_house_load(
+        self,
+        total_load_w: float,
+        *,
+        ev_power_w: float = 0.0,
+    ) -> float:
+        """Return house-only load when the configured load sensor is total site load."""
+        if not self._load_sensor_is_total_load():
+            return max(0.0, total_load_w)
+        return max(0.0, total_load_w - ev_power_w)
+
     async def _update_tracker(
         self,
         now: datetime,
@@ -1218,6 +1234,9 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         cfg = self._entry.data
         prev_data = self.data  # may be None on first call
         data = SolarFriendData()
+        raw_load_power = 0.0
+        prefetched_ev_power = prev_data.ev_charging_power if prev_data is not None else 0.0
+        prefetched_ev_status: str | None = None
 
         # Carry over optimizer + forecast results between polling cycles
         if prev_data is not None:
@@ -1294,7 +1313,20 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         data.grid_power    = readings.get("grid_power", 0.0)
         data.battery_soc   = readings.get("battery_soc", 0.0)
         data.battery_power = readings.get("battery_power", 0.0)
-        data.load_power    = readings.get("load_power", 0.0)
+        raw_load_power     = readings.get("load_power", 0.0)
+
+        if self._ev_enabled and self._ev_charger is not None:
+            try:
+                prefetched_ev_status = await self._ev_charger.get_status()
+                prefetched_ev_power = await self._ev_charger.get_power_w()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug("EV prefetch failed during load cleanup: %s", exc)
+
+        data.ev_charging_power = prefetched_ev_power
+        data.load_power = self._clean_live_house_load(
+            raw_load_power,
+            ev_power_w=prefetched_ev_power,
+        )
 
         # Derived: surplus
         data.solar_surplus = data.pv_power - data.load_power
@@ -1480,11 +1512,14 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         # ── EV charging ───────────────────────────────────────────────────
         if self._ev_enabled:
             self.data = data  # type: ignore[assignment]
-            await self._update_ev()
+            await self._update_ev(
+                charger_status=prefetched_ev_status,
+                charger_power=prefetched_ev_power,
+            )
 
         if "load_power" in readings:
             await self._maybe_update_profile(
-                data.load_power,
+                raw_load_power,
                 ev_power_w=data.ev_charging_power,
                 battery_power_w=data.battery_power,
             )
@@ -1512,11 +1547,18 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         return data
 
-    async def _update_ev(self) -> None:
+    async def _update_ev(
+        self,
+        *,
+        charger_status: str | None = None,
+        charger_power: float | None = None,
+    ) -> None:
         """Run EV optimizer and act on the result."""
         try:
-            charger_status = await self._ev_charger.get_status()
-            charger_power = await self._ev_charger.get_power_w()
+            if charger_status is None:
+                charger_status = await self._ev_charger.get_status()
+            if charger_power is None:
+                charger_power = await self._ev_charger.get_power_w()
             vehicle_soc = self._vehicle.get_soc()
             vehicle_target_soc = (
                 self.ev_target_soc_override
