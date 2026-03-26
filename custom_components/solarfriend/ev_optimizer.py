@@ -38,6 +38,7 @@ class EVContext:
 
     pv_power_w: float
     load_power_w: float
+    grid_power_w: float
     battery_charging_w: float
     battery_soc: float
     battery_capacity_kwh: float
@@ -59,6 +60,7 @@ class EVContext:
     ev_plan_expected_soc_now: float = 0.0
     current_price_dkk: float = 0.0
     hybrid_slots: list[EVHybridSlot] = field(default_factory=list)
+    allow_battery_charge_reclaim: bool = False
 
 
 @dataclass
@@ -131,10 +133,25 @@ def _battery_needs_priority(ctx: EVContext) -> bool:
 
 
 def _surplus_w(ctx: EVContext) -> float:
-    """Return solar surplus available for EV charging without using house battery."""
+    """Return solar power that could be made available to the EV.
+
+    If the house battery is currently charging while the site is not importing
+    meaningful power, that charging load is treated as flexible only inside an
+    active EV charging slot and can be redirected to the car.
+    """
     battery_load_w = max(0.0, -ctx.battery_charging_w)
     battery_discharge_w = max(0.0, ctx.battery_charging_w)
-    return ctx.pv_power_w - ctx.load_power_w - battery_load_w - battery_discharge_w
+    reclaimable_battery_charge_w = (
+        battery_load_w
+        if ctx.allow_battery_charge_reclaim and ctx.grid_power_w <= 100.0
+        else 0.0
+    )
+    return (
+        ctx.pv_power_w
+        - ctx.load_power_w
+        - battery_discharge_w
+        + reclaimable_battery_charge_w
+    )
 
 
 def _needed_kwh(ctx: EVContext) -> float:

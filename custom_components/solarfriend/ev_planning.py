@@ -137,6 +137,7 @@ class EVPlanningHelper:
         ctx = EVContext(
             pv_power_w=data.pv_power,
             load_power_w=data.load_power,
+            grid_power_w=data.grid_power,
             battery_charging_w=data.battery_power,
             battery_soc=data.battery_soc,
             battery_capacity_kwh=float(self._entry.data.get("battery_capacity_kwh", 10.0)),
@@ -158,6 +159,7 @@ class EVPlanningHelper:
             ev_plan_expected_soc_now=current_soc,
             current_price_dkk=data.price,
             hybrid_slots=self.build_ev_hybrid_slots(data=data, now=now, departure=departure),
+            allow_battery_charge_reclaim=False,
         )
         raw_plan = self._ev_optimizer.build_plan(ctx, mode=ev_charge_mode)
         plan: list[dict[str, Any]] = []
@@ -211,21 +213,21 @@ class EVPlanningHelper:
             return {}
 
         # Evaluate EV solar priority against raw forecast/load before the battery plan
-        # consumes the same solar. The later recoverability check decides whether
-        # EV is allowed to win that solar from the house battery.
-        hybrid_slots = self.build_ev_hybrid_slots(
+        # consumes the same solar.
+        raw_slots = self.build_ev_hybrid_slots(
             data=data,
             now=now,
             departure=departure,
             include_battery_reserved=False,
         )
-        if not hybrid_slots:
+        if not raw_slots:
             return {}
 
         vehicle_efficiency = float(self._entry.data.get("vehicle_efficiency_km_per_kwh", 6.0))
         ev_ctx = EVContext(
             pv_power_w=data.pv_power,
             load_power_w=data.load_power,
+            grid_power_w=data.grid_power,
             battery_charging_w=data.battery_power,
             battery_soc=data.battery_soc,
             battery_capacity_kwh=float(self._entry.data.get("battery_capacity_kwh", 10.0)),
@@ -246,20 +248,64 @@ class EVPlanningHelper:
             solar_forecast_to_departure_kwh=self._forecast_kwh_between(now, departure),
             ev_plan_expected_soc_now=vehicle_soc,
             current_price_dkk=data.price,
-            hybrid_slots=hybrid_slots,
+            hybrid_slots=raw_slots,
+            allow_battery_charge_reclaim=False,
         )
         ev_plan = self._ev_optimizer.build_plan(ev_ctx, mode=ev_charge_mode)
+        raw_solar_by_start: dict[datetime, float] = {}
+        for slot in raw_slots:
+            raw_solar_by_start[slot.start] = max(
+                0.0,
+                float(slot.solar_surplus_w) / 1000.0 * float(slot.duration_h),
+            )
+
+        ev_solar_by_start: dict[datetime, float] = {}
+        for slot in ev_plan:
+            ev_solar_by_start[slot["start"]] = max(
+                0.0,
+                float(slot["solar_w"]) / 1000.0 * float(slot["duration_h"]),
+            )
+
         reservations: dict[datetime, float] = {}
         reserved_total_kwh = 0.0
-        for slot in ev_plan:
-            solar_w = float(slot["solar_w"])
-            duration_h = float(slot["duration_h"])
-            if solar_w <= 0 or duration_h <= 0:
-                continue
-            start = slot["start"]
-            reserved_kwh = solar_w / 1000.0 * duration_h
-            reservations[start] = reservations.get(start, 0.0) + reserved_kwh
-            reserved_total_kwh += reserved_kwh
+
+        if ev_charge_mode == "solar_only":
+            battery_max_soc = float(self._entry.data.get("battery_max_soc", 100.0))
+            battery_needed_kwh = max(
+                0.0,
+                (battery_max_soc - data.battery_soc) / 100.0
+                * float(self._entry.data.get("battery_capacity_kwh", 10.0)),
+            )
+
+            ordered_starts = sorted(raw_solar_by_start)
+            future_raw_after_start: dict[datetime, float] = {}
+            future_sum = 0.0
+            for start in reversed(ordered_starts):
+                future_raw_after_start[start] = future_sum
+                future_sum += raw_solar_by_start.get(start, 0.0)
+
+            for start in ordered_starts:
+                raw_kwh = raw_solar_by_start.get(start, 0.0)
+                ev_kwh = ev_solar_by_start.get(start, 0.0)
+                if raw_kwh <= 0 or ev_kwh <= 0:
+                    continue
+                future_raw_kwh = future_raw_after_start.get(start, 0.0)
+                must_leave_for_battery = max(0.0, battery_needed_kwh - future_raw_kwh)
+                reserveable_kwh = min(ev_kwh, max(0.0, raw_kwh - must_leave_for_battery))
+                if reserveable_kwh <= 0:
+                    continue
+                reservations[start] = reserveable_kwh
+                reserved_total_kwh += reserveable_kwh
+        else:
+            for slot in ev_plan:
+                solar_w = float(slot["solar_w"])
+                duration_h = float(slot["duration_h"])
+                if solar_w <= 0 or duration_h <= 0:
+                    continue
+                start = slot["start"]
+                reserved_kwh = solar_w / 1000.0 * duration_h
+                reservations[start] = reservations.get(start, 0.0) + reserved_kwh
+                reserved_total_kwh += reserved_kwh
 
         if reserved_total_kwh <= 0:
             return {}
@@ -304,13 +350,14 @@ class EVPlanningHelper:
                 continue
             recoverable_solar_kwh += max(0.0, slot.solar_surplus_w) / 1000.0 * float(slot.duration_h)
 
-        if not _should_prioritize_ev_solar(
-            ev_alt_grid_price=ev_alt_grid_price,
-            battery_future_value=battery_future_value,
-            recoverable_battery_kwh=recoverable_solar_kwh,
-            reserved_ev_solar_kwh=reserved_total_kwh,
-        ):
-            return {}
+        if ev_charge_mode != "solar_only":
+            if not _should_prioritize_ev_solar(
+                ev_alt_grid_price=ev_alt_grid_price,
+                battery_future_value=battery_future_value,
+                recoverable_battery_kwh=recoverable_solar_kwh,
+                reserved_ev_solar_kwh=reserved_total_kwh,
+            ):
+                return {}
 
         _LOGGER.debug(
             "EV priority active: reserving %.2f kWh solar for EV before %s; EV alt %.2f kr/kWh, battery alt %.2f kr/kWh, recoverable afterwards %.2f kWh",

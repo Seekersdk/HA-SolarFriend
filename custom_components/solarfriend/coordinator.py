@@ -18,7 +18,7 @@ import asyncio
 import logging
 import math
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable
 
@@ -299,6 +299,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._ev_last_action_time: datetime | None = None
         self._ev_currently_charging: bool = False
         self._ev_sync_on_startup: bool = True
+        self._ev_active_solar_slot: bool = False
         self.ev_charging_allowed: bool = True  # styres af SolarFriendEVSwitch
 
         if self._ev_enabled:
@@ -750,20 +751,46 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 self.ev_next_departure,
             )
 
-        result = self._optimizer.optimize(
-            now=now,
-            pv_power=pv_power,
-            load_power=load_power,
-            current_soc=current_soc,
-            raw_prices=raw_prices,
-            raw_sell_prices=raw_sell_prices,
-            forecast_today_kwh=forecast_today,
-            forecast_tomorrow_kwh=forecast_tomorrow,
-            sunrise_time=sunrise,
-            sunset_time=sunset,
-            is_weekend=is_weekend,
-            hourly_forecast=hourly_forecast,
-            reserved_solar_kwh=reserved_ev_solar_kwh,
+        def _run_battery_optimizer(reserved_solar_kwh: dict[datetime, float] | None):
+            return self._optimizer.optimize(
+                now=now,
+                pv_power=pv_power,
+                load_power=load_power,
+                current_soc=current_soc,
+                raw_prices=raw_prices,
+                raw_sell_prices=raw_sell_prices,
+                forecast_today_kwh=forecast_today,
+                forecast_tomorrow_kwh=forecast_tomorrow,
+                sunrise_time=sunrise,
+                sunset_time=sunset,
+                is_weekend=is_weekend,
+                hourly_forecast=hourly_forecast,
+                reserved_solar_kwh=reserved_solar_kwh,
+            )
+
+        result = _run_battery_optimizer(reserved_ev_solar_kwh)
+
+        if self._ev_enabled and self.ev_charge_mode == "solar_only" and reserved_ev_solar_kwh:
+            plan = self._optimizer.get_last_plan()
+            has_grid_charge = any(float(slot.get("grid_charge_w", 0.0)) > 0 for slot in plan)
+            if has_grid_charge:
+                trimmed_reservations = dict(reserved_ev_solar_kwh)
+                for start in sorted(trimmed_reservations.keys(), reverse=True):
+                    trimmed_reservations.pop(start, None)
+                    candidate = _run_battery_optimizer(trimmed_reservations or None)
+                    candidate_plan = self._optimizer.get_last_plan()
+                    if not any(float(slot.get("grid_charge_w", 0.0)) > 0 for slot in candidate_plan):
+                        reserved_ev_solar_kwh = trimmed_reservations or None
+                        result = candidate
+                        break
+                else:
+                    reserved_ev_solar_kwh = None
+                    result = _run_battery_optimizer(None)
+
+        self._ev_active_solar_slot = (
+            self._ev_enabled
+            and self.ev_charge_mode == "solar_only"
+            and self._has_current_ev_solar_slot(reserved_ev_solar_kwh, now)
         )
 
         selected_result, strategy_changed = self._select_strategy_result(
@@ -773,6 +800,20 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             pv_power=pv_power,
             sunset=sunset,
         )
+
+        if (
+            self._ev_active_solar_slot
+            and selected_result.strategy in {"CHARGE_GRID", "CHARGE_NIGHT"}
+        ):
+            selected_result = replace(
+                selected_result,
+                strategy="SAVE_SOLAR",
+                charge_now=False,
+                reason=(
+                    "EV solar-slot aktiv - inverter tvinges til Load first. "
+                    f"{selected_result.reason}"
+                ),
+            )
 
         self._last_optimize_dt = now
         self._last_optimize_soc = current_soc
@@ -1013,6 +1054,17 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             departure=departure,
             ev_next_departure=self.ev_next_departure,
         )
+
+    @staticmethod
+    def _has_current_ev_solar_slot(
+        reservations: dict[datetime, float] | None,
+        now: datetime,
+    ) -> bool:
+        """Return True when the current hour is reserved for EV solar charging."""
+        if not reservations:
+            return False
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
+        return float(reservations.get(current_hour, 0.0)) > 0.0
 
     def _build_shadow_payload(
         self,
@@ -1519,6 +1571,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             ctx = EVContext(
                 pv_power_w=self.data.pv_power,
                 load_power_w=self.data.load_power,
+                grid_power_w=self.data.grid_power,
                 battery_charging_w=self.data.battery_power,
                 battery_soc=self.data.battery_soc,
                 battery_capacity_kwh=float(
@@ -1546,6 +1599,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 ev_plan_expected_soc_now=_expected_soc,
                 current_price_dkk=self.data.price,
                 hybrid_slots=self._build_ev_hybrid_slots(_now, _departure),
+                allow_battery_charge_reclaim=self._ev_active_solar_slot,
             )
 
             ev_result = self._ev_optimizer.optimize(ctx, mode=self.ev_charge_mode)
