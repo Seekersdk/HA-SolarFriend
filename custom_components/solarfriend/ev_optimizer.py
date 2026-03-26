@@ -581,11 +581,11 @@ class EVOptimizer:
 
     def optimize(self, ctx: EVContext, mode: str = "solar_only") -> EVOptimizeResult:
         """Dispatch to the mode-specific optimizer."""
+        if mode == "solar_only":
+            return self._solar_only(ctx)
         emergency = self._check_emergency_charging(ctx)
         if emergency is not None:
             return emergency
-        if mode == "solar_only":
-            return self._solar_only(ctx)
         if mode == "hybrid":
             return self._hybrid(ctx)
         if mode == "grid_schedule":
