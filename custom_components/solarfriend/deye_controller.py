@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from homeassistant.util import dt as ha_dt
@@ -75,6 +76,11 @@ class DeyeController(InverterController):
             charge_now=result.charge_now,
         )
 
+    def _future_hhmm(self, hours_ahead: int) -> int:
+        """Return HHMM for a point some hours ahead in local time."""
+        future = ha_dt.now() + timedelta(hours=hours_ahead)
+        return future.hour * 100 + future.minute
+
     def _expected_state_for(self, result: OptimizeResult) -> dict[str, str | float]:
         """Return the expected live inverter state for the current strategy."""
         current_hhmm = self._current_hhmm()
@@ -136,7 +142,7 @@ class DeyeController(InverterController):
                 self._grid_charge: "off",
                 self._time_of_use: "on",
                 self._tp1_enable: "on",
-                self._tp1_start: float(current_hhmm),
+                self._tp1_start: float(self._future_hhmm(6)),
                 self._tp1_capacity: float(target_soc),
                 self._energy_priority: "Load first",
                 self._limit_control_mode: "Zero export to CT",
@@ -295,7 +301,7 @@ class DeyeController(InverterController):
         await self._set_switch(self._grid_charge, False)
         await self._set_switch(self._time_of_use, True)
         await self._set_switch(self._tp1_enable, True)
-        await self._set_number(self._tp1_start, self._current_hhmm())
+        await self._set_number(self._tp1_start, self._future_hhmm(6))
         await self._set_number(self._tp1_capacity, target_soc)
         await self._set_select(self._energy_priority, "Load first")
         await self._set_select(self._limit_control_mode, "Zero export to CT")
