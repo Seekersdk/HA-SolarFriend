@@ -1582,6 +1582,9 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             else:
                 self.data.ev_min_soc_from_range = 0.0
 
+            actual_charging = charger_status == "charging" or charger_power > 100.0
+            self._ev_currently_charging = actual_charging
+
             # Anti-flap: vent mindst 5 min mellem handlinger
             now = ha_dt.now()
             can_act = (
