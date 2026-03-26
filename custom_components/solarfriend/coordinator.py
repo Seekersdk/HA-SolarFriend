@@ -94,6 +94,8 @@ SUNSET_OVERRIDE_REMAINING_KWH = 0.25
 _BATTERY_NOISE_W = 50  # ignore changes below this threshold
 _PLAN_DEVIATION_MIN_W = 400.0
 _PLAN_DEVIATION_FRACTION = 0.25
+_EV_GRID_PRIORITY_MARGIN_W = 200.0
+_EV_BATTERY_PROTECTION_MARGIN_W = 250.0
 
 
 @dataclass
@@ -1148,6 +1150,18 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             return max(0.0, total_load_w)
         return max(0.0, total_load_w - ev_power_w)
 
+    def _ev_requires_battery_hold(self, ev_result: Any) -> bool:
+        """Return True when EV charging should hold battery SOC via TOU."""
+        if self.data is None or not ev_result.should_charge:
+            return False
+        if self.ev_charge_mode not in {"hybrid", "grid_schedule"}:
+            return False
+
+        surplus_w = max(0.0, float(ev_result.surplus_w))
+        needs_grid_support = float(ev_result.target_w) > surplus_w + _EV_GRID_PRIORITY_MARGIN_W
+        battery_to_ev = self.data.battery_power > self.data.load_power + _EV_BATTERY_PROTECTION_MARGIN_W
+        return needs_grid_support or battery_to_ev
+
     async def _update_tracker(
         self,
         now: datetime,
@@ -1678,14 +1692,33 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             else:
                 self.data.ev_min_soc_from_range = 0.0
 
+            if (
+                self._inverter is not None
+                and self._inverter.is_configured
+                and self.data.optimize_result is not None
+                and self._ev_requires_battery_hold(ev_result)
+            ):
+                await self._inverter.apply(
+                    replace(
+                        self.data.optimize_result,
+                        strategy="EV_HOLD_BATTERY",
+                        charge_now=False,
+                        target_soc=math.ceil(self.data.battery_soc),
+                        reason=(
+                            "EV holder batteri-SOC via midlertidig TOU. "
+                            f"{self.data.optimize_result.reason}"
+                        ),
+                    )
+                )
+
             actual_charging = charger_status == "charging" or charger_power > 100.0
             self._ev_currently_charging = actual_charging
 
-            # Anti-flap: vent mindst 5 min mellem handlinger
+            # Anti-flap: vent mindst 2 min mellem start/stop-handlinger
             now = ha_dt.now()
             can_act = (
                 self._ev_last_action_time is None
-                or (now - self._ev_last_action_time).total_seconds() > 300
+                or (now - self._ev_last_action_time).total_seconds() > 120
             )
 
             if can_act:

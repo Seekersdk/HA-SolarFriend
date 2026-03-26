@@ -75,10 +75,110 @@ class DeyeController(InverterController):
             charge_now=result.charge_now,
         )
 
+    def _expected_state_for(self, result: OptimizeResult) -> dict[str, str | float]:
+        """Return the expected live inverter state for the current strategy."""
+        current_hhmm = self._current_hhmm()
+        target_soc = int(result.target_soc) if result.target_soc else 80
+
+        if result.strategy == "CHARGE_NIGHT":
+            raw = result.cheapest_charge_hour
+            tp_start = 0
+            if raw and isinstance(raw, str) and ":" in raw:
+                parts = raw.split(":")
+                try:
+                    tp_start = int(parts[0]) * 100 + int(parts[1])
+                except (ValueError, IndexError):
+                    tp_start = 0
+            return {
+                self._grid_charge: "on",
+                self._time_of_use: "on",
+                self._tp1_enable: "on",
+                self._tp1_start: float(tp_start),
+                self._tp1_capacity: float(target_soc),
+                self._charge_current: 25.0,
+                self._energy_priority: "Battery first",
+                self._limit_control_mode: "Zero export to CT",
+            }
+        if result.strategy == "CHARGE_GRID":
+            return {
+                self._grid_charge: "on",
+                self._time_of_use: "on",
+                self._tp1_enable: "on",
+                self._tp1_start: float(current_hhmm),
+                self._tp1_capacity: float(target_soc),
+                self._charge_current: 25.0,
+                self._energy_priority: "Battery first",
+                self._limit_control_mode: "Zero export to CT",
+            }
+        if result.strategy == "USE_BATTERY":
+            return {
+                self._grid_charge: "off",
+                self._time_of_use: "on",
+                self._tp1_enable: "on",
+                self._tp1_start: float(current_hhmm),
+                self._tp1_capacity: float(int(self._battery_min_soc)),
+                self._energy_priority: "Load first",
+                self._limit_control_mode: "Zero export to CT",
+            }
+        if result.strategy == "SELL_BATTERY":
+            return {
+                self._grid_charge: "off",
+                self._time_of_use: "on",
+                self._tp1_enable: "on",
+                self._tp1_start: float(current_hhmm),
+                self._tp1_capacity: float(int(self._battery_min_soc)),
+                self._energy_priority: "Load first",
+                self._limit_control_mode: "Selling first",
+            }
+        if result.strategy == "EV_HOLD_BATTERY":
+            target_soc = int(result.target_soc) if result.target_soc is not None else 100
+            return {
+                self._grid_charge: "off",
+                self._time_of_use: "on",
+                self._tp1_enable: "on",
+                self._tp1_start: float(current_hhmm),
+                self._tp1_capacity: float(target_soc),
+                self._energy_priority: "Load first",
+                self._limit_control_mode: "Zero export to CT",
+            }
+        if result.strategy in {"IDLE", "SAVE_SOLAR", "ANTI_EXPORT"}:
+            return {
+                self._grid_charge: "off",
+                self._time_of_use: "off",
+                self._tp1_enable: "off",
+                self._energy_priority: "Load first",
+                self._limit_control_mode: "Zero export to CT",
+            }
+        return {}
+
+    def _live_state_matches(self, result: OptimizeResult) -> bool:
+        """Return True when the inverter already matches the desired state."""
+        states = getattr(self.hass, "states", None)
+        if states is None or not hasattr(states, "get"):
+            return True
+
+        expected = self._expected_state_for(result)
+        for entity_id, desired in expected.items():
+            if not entity_id:
+                continue
+            state_obj = states.get(entity_id)
+            if state_obj is None:
+                return False
+            actual = state_obj.state
+            if isinstance(desired, float):
+                try:
+                    if float(actual) != desired:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            elif str(actual) != desired:
+                return False
+        return True
+
     async def apply(self, result: OptimizeResult) -> None:
         """Apply strategy to Deye - skips only when desired command state is unchanged."""
         signature = self._signature_for(result)
-        if signature == self._last_signature:
+        if signature == self._last_signature and self._live_state_matches(result):
             return
 
         _LOGGER.info(
@@ -103,6 +203,9 @@ class DeyeController(InverterController):
         elif result.strategy == "SAVE_SOLAR":
             await self._set_solar_sell(True)
             await self._apply_idle()
+        elif result.strategy == "EV_HOLD_BATTERY":
+            await self._set_solar_sell(True)
+            await self._apply_ev_hold_battery(result)
         elif result.strategy == "CHARGE_GRID":
             await self._set_solar_sell(True)
             await self._apply_charge_grid(result)
@@ -183,6 +286,17 @@ class DeyeController(InverterController):
         await self._set_switch(self._grid_charge, False)
         await self._set_switch(self._time_of_use, False)
         await self._set_switch(self._tp1_enable, False)
+        await self._set_select(self._energy_priority, "Load first")
+        await self._set_select(self._limit_control_mode, "Zero export to CT")
+
+    async def _apply_ev_hold_battery(self, result: OptimizeResult) -> None:
+        """Hold battery SOC via TOU so EV load is covered by PV/grid instead."""
+        target_soc = int(result.target_soc) if result.target_soc is not None else 100
+        await self._set_switch(self._grid_charge, False)
+        await self._set_switch(self._time_of_use, True)
+        await self._set_switch(self._tp1_enable, True)
+        await self._set_number(self._tp1_start, self._current_hhmm())
+        await self._set_number(self._tp1_capacity, target_soc)
         await self._set_select(self._energy_priority, "Load first")
         await self._set_select(self._limit_control_mode, "Zero export to CT")
 
