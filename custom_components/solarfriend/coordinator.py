@@ -546,9 +546,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         if soc_sensor:
             watch_entities.append(soc_sensor)
 
-        for key in ("charge_rate_kw", "battery_min_soc", "battery_max_soc", "min_charge_saving", "cheap_grid_threshold"):
-            watch_entities.append(f"number.{key}")
-
         if watch_entities:
             unsub = async_track_state_change_event(
                 self.hass,
@@ -604,6 +601,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         for unsub in self._unsub_listeners:
             unsub()
         self._unsub_listeners.clear()
+
+    async def async_on_runtime_setting_changed(self, *, reason: str) -> None:
+        """Refresh coordinator data and force a fresh optimizer run."""
+        await self.async_request_refresh()
+        await self._trigger_optimize(reason=reason, notify=True, force=True)
 
     # ------------------------------------------------------------------
     # Optimizer trigger

@@ -151,26 +151,42 @@ class SolarFriendNumber(RestoreEntity, NumberEntity):
         last_state = await self.async_get_last_state()
         if last_state is not None and last_state.state not in ("unknown", "unavailable"):
             try:
-                self._attr_native_value = float(last_state.state)
+                restored_value = float(last_state.state)
             except (ValueError, TypeError):
-                pass
+                return
+
+            self._attr_native_value = restored_value
+            await self._async_sync_config_value(restored_value, reason="restored")
+            self.async_write_ha_state()
 
     async def async_set_native_value(self, value: float) -> None:
         """Persist new value to config entry and trigger coordinator refresh."""
         self._attr_native_value = value
-
-        # Merge updated key into config entry data
-        new_data = {**self._entry.data, self.entity_description.config_key: value}
-        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
-
+        await self._async_sync_config_value(value, reason="updated")
         self.async_write_ha_state()
-        await self._coordinator.async_request_refresh()
-
         _LOGGER.debug(
             "SolarFriend number %s updated to %s",
             self.entity_description.config_key,
             value,
         )
+
+    async def _async_sync_config_value(self, value: float, *, reason: str) -> None:
+        """Keep config entry and optimizer runtime in sync with the exposed number."""
+        key = self.entity_description.config_key
+        try:
+            current_value = float(self._entry.data.get(key, value))
+        except (ValueError, TypeError):
+            current_value = value
+
+        changed = current_value != float(value)
+        if changed:
+            new_data = {**self._entry.data, key: value}
+            self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+
+        if changed or reason == "updated":
+            await self._coordinator.async_on_runtime_setting_changed(
+                reason=f"number-{key}-{reason}"
+            )
 
 
 
