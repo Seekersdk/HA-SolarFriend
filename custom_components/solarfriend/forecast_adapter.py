@@ -8,6 +8,8 @@ from typing import Any
 
 from homeassistant.util import dt as ha_dt
 
+from .time_utils import normalize_local_datetime
+
 _LOGGER = logging.getLogger(__name__)
 
 # Solcast PV Forecast integration — standard entity IDs
@@ -48,11 +50,8 @@ def get_forecast_for_period(
     Handles both timezone-aware and naive datetimes — all are normalised to
     timezone-aware (local) before comparison.
     """
-    def _to_aware(dt: datetime) -> datetime:
-        return dt if dt.tzinfo is not None else dt.astimezone()
-
-    from_dt = _to_aware(from_dt)
-    to_dt   = _to_aware(to_dt)
+    from_dt = normalize_local_datetime(from_dt)
+    to_dt = normalize_local_datetime(to_dt)
 
     total = 0.0
     for entry in hourly_forecast:
@@ -66,7 +65,7 @@ def get_forecast_for_period(
                 continue
         elif not isinstance(ps, datetime):
             continue
-        ps = _to_aware(ps)
+        ps = normalize_local_datetime(ps)
         if from_dt <= ps < to_dt:
             total += float(entry.get("pv_estimate_kwh", 0.0))
     return round(total, 4)
@@ -140,10 +139,8 @@ class ForecastAdapter:
                 if ps_raw is None:
                     continue
                 try:
-                    if isinstance(ps_raw, datetime):
-                        ps = ha_dt.as_local(ps_raw) if ps_raw.tzinfo else ha_dt.as_local(ps_raw.replace(tzinfo=ha_dt.UTC))
-                    else:
-                        ps = ha_dt.as_local(datetime.fromisoformat(str(ps_raw)))
+                    ps = ps_raw if isinstance(ps_raw, datetime) else datetime.fromisoformat(str(ps_raw))
+                    ps = normalize_local_datetime(ps)
                 except (ValueError, TypeError):
                     continue
                 # Solcast API: pv_estimate is kW (30-min average) → kWh = kW × 0.5

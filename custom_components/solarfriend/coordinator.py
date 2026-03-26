@@ -29,14 +29,15 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as ha_dt
 
-from .const import CONF_BUY_PRICE_SENSOR, CONF_SELL_PRICE_SENSOR, DOMAIN
+from .const import (
+    CONF_BUY_PRICE_SENSOR,
+    CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED,
+    CONF_SELL_PRICE_SENSOR,
+    DOMAIN,
+)
 from .consumption_profile import ConsumptionProfile
 from .battery_tracker import BatteryTracker
-from .battery_optimizer import (
-    BatteryOptimizer,
-    LOW_GRID_HOLD_PRICE,
-    OptimizeResult,
-)
+from .battery_optimizer import BatteryOptimizer, OptimizeResult
 from .forecast_adapter import ForecastAdapter, ForecastData, get_forecast_for_period
 from .forecast_correction_model import ForecastCorrectionModel
 from .forecast_tracker import ForecastTracker
@@ -46,7 +47,12 @@ from .ev_charger_controller import EVChargerController
 from .vehicle_controller import VehicleController
 from .ev_optimizer import EVContext, EVHybridSlot, EVOptimizer
 from .ev_planning import EVPlanningHelper
+from .ev_runtime_controller import EVRuntimeController
+from .runtime_config import build_runtime_components, refresh_optimizer_runtime_settings
 from .shadow_logging import ShadowLogger
+from .state_reader import SolarFriendStateReader
+from .weather_profile import SolarOnlyWeatherProfile
+from .weather_service import WeatherProfileService
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -244,6 +250,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._cached_sell_price_data: PriceData | None = None
         self._profile = ConsumptionProfile()
         self._last_profile_update: datetime | None = None
+        self._state_reader = SolarFriendStateReader(hass, entry)
+        self._weather_service = WeatherProfileService(
+            hass,
+            weather_entity=entry.data.get("weather_entity"),
+        )
 
         # BatteryTracker — initialised in async_startup
         self._tracker: BatteryTracker | None = None
@@ -298,16 +309,22 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._ev_charger: EVChargerController | None = None
         self._vehicle: VehicleController | None = None
         self._ev_optimizer: EVOptimizer | None = None
-        self._ev_last_action_time: datetime | None = None
         self._ev_currently_charging: bool = False
-        self._ev_sync_on_startup: bool = True
         self._ev_active_solar_slot: bool = False
+        self.ev_solar_only_grid_buffer_enabled: bool = bool(
+            entry.data.get(CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED, True)
+        )
+        self._ev_runtime: EVRuntimeController | None = None
         self.ev_charging_allowed: bool = True  # styres af SolarFriendEVSwitch
 
         if self._ev_enabled:
             self._ev_charger = EVChargerController.from_config(hass, entry)
             self._vehicle = VehicleController.from_config(hass, entry)
             self._ev_optimizer = EVOptimizer()
+            self._ev_runtime = EVRuntimeController(
+                ev_optimizer=self._ev_optimizer,
+                ev_charger=self._ev_charger,
+            )
             self._ev_planning = EVPlanningHelper(
                 entry=entry,
                 ev_optimizer=self._ev_optimizer,
@@ -364,13 +381,16 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._forecast_correction_model = ForecastCorrectionModel(self.hass, self._entry.entry_id)
         await self._forecast_correction_model.async_load()
 
-        self._optimizer = BatteryOptimizer(
-            config_entry=self._entry,
+        runtime_components = build_runtime_components(
+            self.hass,
+            self._entry,
             battery_tracker=self._tracker,
             consumption_profile=self._profile,
         )
-
-        self._inverter = InverterController.from_config(self.hass, self._entry)
+        self._optimizer = runtime_components.optimizer
+        self._inverter = runtime_components.inverter
+        self._state_reader = runtime_components.state_reader
+        self._weather_service = runtime_components.weather_service
         if self._inverter.is_configured:
             _LOGGER.info(
                 "InverterController: %s klar",
@@ -607,6 +627,16 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
     async def async_on_runtime_setting_changed(self, *, reason: str) -> None:
         """Refresh coordinator data and force a fresh optimizer run."""
+        runtime_components = build_runtime_components(
+            self.hass,
+            self._entry,
+            battery_tracker=self._tracker,
+            consumption_profile=self._profile,
+        )
+        self._optimizer = runtime_components.optimizer
+        self._inverter = runtime_components.inverter
+        self._state_reader = runtime_components.state_reader
+        self._weather_service = runtime_components.weather_service
         await self.async_request_refresh()
         await self._trigger_optimize(reason=reason, notify=True, force=True)
 
@@ -629,12 +659,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         _LOGGER.info("Optimizer triggered: reason=%s", reason)
 
         # Refresh runtime-configurable values from config entry (changed via number entities)
-        _cfg = self._entry.data
-        self._optimizer.charge_rate_kw     = float(_cfg.get("charge_rate_kw",     6.0))
-        self._optimizer.battery_min_soc    = float(_cfg.get("battery_min_soc",   10.0))
-        self._optimizer.battery_max_soc    = float(_cfg.get("battery_max_soc",  100.0))
-        self._optimizer.min_charge_saving  = float(_cfg.get("min_charge_saving",  0.10))
-        self._optimizer.cheap_grid_threshold = float(_cfg.get("cheap_grid_threshold", LOW_GRID_HOLD_PRICE))
+        refresh_optimizer_runtime_settings(self._optimizer, self._entry)
 
         now = ha_dt.now()
 
@@ -859,14 +884,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
     # ------------------------------------------------------------------
 
     def _read_state(self, entity_id: str) -> tuple[float | None, bool]:
-        """Return (float_value, is_available) for an entity."""
-        state = self.hass.states.get(entity_id)
-        if state is None or state.state in ("unavailable", "unknown", ""):
-            return None, False
-        try:
-            return float(state.state), True
-        except (ValueError, TypeError):
-            return None, False
+        """Backward-compatible wrapper around the dedicated state reader."""
+        return self._state_reader.read_float_state(entity_id)
 
     def _get_raw_prices(self) -> list[dict[str, Any]]:
         """Return the normalised price list from the current data snapshot."""
@@ -1049,7 +1068,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             ev_charging_allowed=self.ev_charging_allowed,
             data=self.data,
             ev_charge_mode=self.ev_charge_mode,
-            ev_currently_charging=self._ev_currently_charging,
+            ev_currently_charging=self._ev_runtime.currently_charging if self._ev_runtime else False,
             ev_min_range_km=self.ev_min_range_km,
             vehicle_target_soc_override=self.ev_target_soc_override,
             now=now,
@@ -1136,8 +1155,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
     def _load_sensor_is_total_load(self) -> bool:
         """Return True when the configured load sensor is a whole-site total load."""
-        entity_id = str(self._entry.data.get("load_power_sensor", "")).lower()
-        return any(token in entity_id for token in ("load_totalpower", "totalpower", "total_load"))
+        return self._state_reader.load_sensor_is_total_load()
 
     def _clean_live_house_load(
         self,
@@ -1146,9 +1164,28 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         ev_power_w: float = 0.0,
     ) -> float:
         """Return house-only load when the configured load sensor is total site load."""
-        if not self._load_sensor_is_total_load():
-            return max(0.0, total_load_w)
-        return max(0.0, total_load_w - ev_power_w)
+        return self._state_reader.clean_live_house_load(
+            total_load_w,
+            ev_power_w=ev_power_w,
+        )
+
+    def _ensure_weather_service(self) -> WeatherProfileService:
+        """Return weather service, creating a fallback for tests that bypass __init__."""
+        if not hasattr(self, "_weather_service"):
+            self._weather_service = WeatherProfileService(
+                self.hass,
+                weather_entity=self._entry.data.get("weather_entity"),
+            )
+        return self._weather_service
+
+    def _ensure_ev_runtime(self) -> EVRuntimeController:
+        """Return EV runtime controller, creating a fallback for tests that bypass __init__."""
+        if not hasattr(self, "_ev_runtime"):
+            self._ev_runtime = EVRuntimeController(
+                ev_optimizer=self._ev_optimizer,
+                ev_charger=getattr(self, "_ev_charger", None),
+            )
+        return self._ev_runtime
 
     def _ev_requires_battery_hold(self, ev_result: Any) -> bool:
         """Return True when EV charging should hold battery SOC via TOU."""
@@ -1258,27 +1295,20 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             data.plan_optimize_result = prev_data.plan_optimize_result
             data.forecast_data   = prev_data.forecast_data
 
-        sensor_map: dict[str, str] = {
-            "pv_power":      cfg.get("pv_power_sensor", ""),
-            "pv2_power":     cfg.get("pv2_power_sensor", ""),
-            "grid_power":    cfg.get("grid_power_sensor", ""),
-            "battery_soc":   cfg.get("battery_soc_sensor", ""),
+        state_result = self._state_reader.read_core_sensors()
+        readings = state_result.readings
+        unavailable = list(state_result.unavailable)
+        sensor_id_map: dict[str, str] = {
+            "pv_power": cfg.get("pv_power_sensor", ""),
+            "pv2_power": cfg.get("pv2_power_sensor", ""),
+            "grid_power": cfg.get("grid_power_sensor", ""),
+            "battery_soc": cfg.get("battery_soc_sensor", ""),
             "battery_power": cfg.get("battery_power_sensor", ""),
-            "load_power":    cfg.get("load_power_sensor", ""),
+            "load_power": cfg.get("load_power_sensor", ""),
         }
-
-        readings: dict[str, float] = {}
-        unavailable: list[str] = []
-
-        for field_name, entity_id in sensor_map.items():
-            if not entity_id:
-                unavailable.append(field_name)
-                continue
-            value, available = self._read_state(entity_id)
-            if available and value is not None:
-                readings[field_name] = value
-            else:
-                unavailable.append(field_name)
+        for field_name in unavailable:
+            entity_id = sensor_id_map.get(field_name, "")
+            if entity_id:
                 _LOGGER.debug("Sensor unavailable: %s (%s)", field_name, entity_id)
 
         now = ha_dt.now()
@@ -1580,12 +1610,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 else self._vehicle.get_target_soc()
             )
 
-            # Synkroniser _ev_currently_charging fra faktisk status ved opstart
-            if self._ev_sync_on_startup:
-                self._ev_sync_on_startup = False
-                self._ev_currently_charging = charger_status == "charging"
-                if self._ev_currently_charging:
-                    _LOGGER.info("EV: synkroniseret til charging ved opstart")
+            ev_runtime = self._ensure_ev_runtime()
+            ev_runtime.sync_startup(charger_status)
 
             # Manuel EV-switch: hvis slukket → behandl som disconnected
             if not self.ev_charging_allowed:
@@ -1611,6 +1637,9 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 _departure.strftime("%H:%M"),
                 solar_to_departure,
             )
+            solar_only_profile = await self._get_current_solar_only_profile(_now)
+            if not self.ev_solar_only_grid_buffer_enabled:
+                solar_only_profile = replace(solar_only_profile, grid_buffer_w=0.0)
 
             # Expected SOC at this moment from previous plan — used for behind-schedule check
             _now_hour = _now.replace(minute=0, second=0, microsecond=0)
@@ -1637,7 +1666,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                     self._entry.data.get("battery_min_soc", 10.0)
                 ),
                 charger_status=charger_status,
-                currently_charging=self._ev_currently_charging,
+                currently_charging=ev_runtime.currently_charging,
                 vehicle_soc=vehicle_soc,
                 vehicle_capacity_kwh=self.vehicle_battery_kwh,
                 vehicle_target_soc=vehicle_target_soc,
@@ -1656,9 +1685,24 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 current_price_dkk=self.data.price,
                 hybrid_slots=self._build_ev_hybrid_slots(_now, _departure),
                 allow_battery_charge_reclaim=self._ev_active_solar_slot,
+                solar_only_profile_name=solar_only_profile.key,
+                solar_only_start_threshold_w=solar_only_profile.start_surplus_w,
+                solar_only_stop_threshold_w=solar_only_profile.stop_surplus_w,
+                solar_only_grid_buffer_w=solar_only_profile.grid_buffer_w,
             )
 
             ev_result = self._ev_optimizer.optimize(ctx, mode=self.ev_charge_mode)
+            actual_charging = ev_runtime.set_currently_charging_from_actual(
+                charger_status=charger_status,
+                charger_power=charger_power,
+            )
+            if self.ev_charge_mode == "solar_only":
+                ev_result = ev_runtime.apply_solar_only_hysteresis(
+                    ctx=ctx,
+                    result=ev_result,
+                    profile=solar_only_profile,
+                    actual_charging=actual_charging,
+                )
 
             # Opdater data FØRST — altid konsistente sensorer selv hvis service calls fejler
             self.data.ev_charging_enabled = True
@@ -1711,37 +1755,16 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                     )
                 )
 
-            actual_charging = charger_status == "charging" or charger_power > 100.0
             self._ev_currently_charging = actual_charging
-
-            # Anti-flap: vent mindst 2 min mellem start/stop-handlinger
             now = ha_dt.now()
-            can_act = (
-                self._ev_last_action_time is None
-                or (now - self._ev_last_action_time).total_seconds() > 120
+            await ev_runtime.async_apply_charge_decision(
+                ev_result=ev_result,
+                now=now,
             )
+            self._ev_currently_charging = ev_runtime.currently_charging
 
-            if can_act:
-                if ev_result.should_charge and not self._ev_currently_charging:
-                    await self._ev_charger.resume()
-                    await asyncio.sleep(2)  # FIX 3: vent på Easee at komme ud af pause
-                    await self._ev_charger.set_power(ev_result.target_w, ev_result.phases)
-                    self._ev_currently_charging = True
-                    self._ev_last_action_time = now
-                    _LOGGER.info(
-                        "EV: start ladning %d-fase %.1fA (%.0fW) — %s",
-                        ev_result.phases, ev_result.target_amps,
-                        ev_result.target_w, ev_result.reason,
-                    )
+            
 
-                elif ev_result.should_charge and self._ev_currently_charging:
-                    await self._ev_charger.set_power(ev_result.target_w, ev_result.phases)
-
-                elif not ev_result.should_charge and self._ev_currently_charging:
-                    await self._ev_charger.pause()
-                    self._ev_currently_charging = False
-                    self._ev_last_action_time = now
-                    _LOGGER.info("EV: stop ladning — %s", ev_result.reason)
 
             # Compute EV plan after data is updated
             self.data.ev_plan = self._compute_ev_plan()
@@ -1757,10 +1780,34 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         return self._ev_planning.compute_ev_plan(
             data=self.data,
             ev_charge_mode=self.ev_charge_mode,
-            ev_currently_charging=self._ev_currently_charging,
+            ev_currently_charging=self._ev_runtime.currently_charging if self._ev_runtime else False,
             ev_min_range_km=self.ev_min_range_km,
             now=ha_dt.now(),
             departure=self.ev_next_departure,
+        )
+
+    async def _fetch_weather_hourly_forecast(self) -> list[dict[str, Any]]:
+        """Fetch and cache hourly weather forecast for Solar Only profiling."""
+        return await self._ensure_weather_service().async_fetch_hourly_forecast()
+
+    async def _get_current_solar_only_profile(self, now: datetime) -> SolarOnlyWeatherProfile:
+        """Return the active Solar Only weather profile for the current hour."""
+        return await self._ensure_weather_service().async_get_current_profile(now)
+
+    def _apply_solar_only_hysteresis(
+        self,
+        *,
+        ctx: EVContext,
+        result: Any,
+        profile: SolarOnlyWeatherProfile,
+        actual_charging: bool,
+    ):
+        """Apply time-based start/stop hysteresis for Solar Only EV charging."""
+        return self._ensure_ev_runtime().apply_solar_only_hysteresis(
+            ctx=ctx,
+            result=result,
+            profile=profile,
+            actual_charging=actual_charging,
         )
 
     def _build_ev_hybrid_slots(self, now: datetime, departure: datetime) -> list[EVHybridSlot]:

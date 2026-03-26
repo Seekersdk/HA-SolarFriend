@@ -313,9 +313,8 @@ class ConsumptionProfile:
         ev_power_w: float = 0.0,
         battery_power_w: float = 0.0,
     ) -> float | None:
-        """Return net household consumption by subtracting EV and grid charging."""
-        battery_grid_charge_w = max(0.0, -battery_power_w)
-        household_w = load_w - ev_power_w - battery_grid_charge_w
+        """Return household consumption with EV load removed."""
+        household_w = load_w - ev_power_w
         if household_w < 0:
             household_w = 0.0
         if household_w > 10_000:

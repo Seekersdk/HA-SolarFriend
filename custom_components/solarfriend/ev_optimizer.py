@@ -61,6 +61,10 @@ class EVContext:
     current_price_dkk: float = 0.0
     hybrid_slots: list[EVHybridSlot] = field(default_factory=list)
     allow_battery_charge_reclaim: bool = False
+    solar_only_profile_name: str = "default"
+    solar_only_start_threshold_w: float = MIN_1PHASE_W
+    solar_only_stop_threshold_w: float = STOP_THRESHOLD_W
+    solar_only_grid_buffer_w: float = 0.0
 
 
 @dataclass
@@ -75,6 +79,10 @@ class EVOptimizeResult:
     surplus_w: float = 0.0
     charger_status: str = "disconnected"
     is_emergency: bool = False
+    solar_only_profile_name: str = "default"
+    start_hold_seconds: int = 0
+    stop_hold_seconds: int = 0
+    grid_buffer_w: float = 0.0
 
 
 def _strip_tz(dt: datetime) -> datetime:
@@ -339,6 +347,8 @@ class EVOptimizer:
             vehicle_target_soc=ctx.vehicle_target_soc,
             surplus_w=surplus,
             charger_status=ctx.charger_status,
+            solar_only_profile_name=ctx.solar_only_profile_name,
+            grid_buffer_w=ctx.solar_only_grid_buffer_w,
         )
 
         if ctx.charger_status == "disconnected":
@@ -349,12 +359,16 @@ class EVOptimizer:
             base.reason = f"Bil fuld ({ctx.vehicle_soc:.0f}% >= {ctx.vehicle_target_soc:.0f}%)"
             return base
 
-        threshold = STOP_THRESHOLD_W if ctx.currently_charging else MIN_1PHASE_W
+        threshold = (
+            ctx.solar_only_stop_threshold_w
+            if ctx.currently_charging
+            else ctx.solar_only_start_threshold_w
+        )
         if surplus < threshold:
             base.reason = f"For lidt sol-overskud ({surplus:.0f}W < {threshold:.0f}W)"
             return base
 
-        effective_surplus = max(surplus, MIN_1PHASE_W)
+        effective_surplus = max(surplus + max(0.0, ctx.solar_only_grid_buffer_w), MIN_1PHASE_W)
         _, phases, amps, actual_w = self._calc_phase_and_amps(effective_surplus, ctx.max_charge_kw * 1000)
         if actual_w <= 0:
             base.reason = "Max ladeeffekt under minimum"

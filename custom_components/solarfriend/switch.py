@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
+from .const import CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED, DOMAIN
 from .coordinator import SolarFriendCoordinator, ev_device_info
 
 _LOGGER = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ async def async_setup_entry(
     entities: list[SwitchEntity] = [SolarFriendShadowLogSwitch(coordinator, entry)]
     if entry.data.get("ev_charging_enabled", False):
         entities.append(SolarFriendEVSwitch(coordinator))
+        entities.append(SolarFriendEVSolarOnlyGridBufferSwitch(coordinator, entry))
     async_add_entities(entities)
 
 
@@ -126,3 +127,61 @@ class SolarFriendShadowLogSwitch(RestoreEntity, SwitchEntity):
         await self._persist_state()
         self.async_write_ha_state()
         _LOGGER.info("Shadow log deaktiveret")
+
+
+class SolarFriendEVSolarOnlyGridBufferSwitch(RestoreEntity, SwitchEntity):
+    """Persistent switch for optional grid buffer in Solar Only EV charging."""
+
+    _attr_has_entity_name = True
+    _attr_name = "EV Solar Only Grid Buffer"
+    _attr_icon = "mdi:transmission-tower-import"
+
+    def __init__(self, coordinator: SolarFriendCoordinator, entry: ConfigEntry) -> None:
+        self._coordinator = coordinator
+        self._entry = entry
+        self._is_on = bool(entry.data.get(CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED, True))
+        self._attr_unique_id = f"{entry.entry_id}_ev_solar_only_grid_buffer"
+
+    @property
+    def device_info(self):
+        return ev_device_info(self._coordinator)
+
+    @property
+    def is_on(self) -> bool:
+        return self._is_on
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state in ("on", "off"):
+            self._is_on = last_state.state == "on"
+        self._coordinator.ev_solar_only_grid_buffer_enabled = self._is_on
+        new_data = {
+            **self._entry.data,
+            CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED: self._is_on,
+        }
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+
+    async def _persist_state(self, *, reason: str) -> None:
+        new_data = {
+            **self._entry.data,
+            CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED: self._is_on,
+        }
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        await self._coordinator.async_on_runtime_setting_changed(
+            reason=f"switch-{CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED}-{reason}"
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self._is_on = True
+        self._coordinator.ev_solar_only_grid_buffer_enabled = True
+        await self._persist_state(reason="updated")
+        self.async_write_ha_state()
+        _LOGGER.info("EV Solar Only grid-buffer aktiveret")
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self._is_on = False
+        self._coordinator.ev_solar_only_grid_buffer_enabled = False
+        await self._persist_state(reason="updated")
+        self.async_write_ha_state()
+        _LOGGER.info("EV Solar Only grid-buffer deaktiveret")

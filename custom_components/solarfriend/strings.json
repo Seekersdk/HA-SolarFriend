@@ -30,7 +30,8 @@
           "grid_power_sensor": "Net effekt",
           "battery_soc_sensor": "Batteri SOC",
           "battery_power_sensor": "Batteri effekt",
-          "load_power_sensor": "Forbrug"
+          "load_power_sensor": "Forbrug",
+          "weather_entity": "Vejrudsigt"
         }
       },
       "battery_config": {

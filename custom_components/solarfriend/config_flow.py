@@ -22,7 +22,12 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
 )
 
-from .const import CONF_BUY_PRICE_SENSOR, CONF_SELL_PRICE_SENSOR, DOMAIN
+from .const import (
+    CONF_BUY_PRICE_SENSOR,
+    CONF_SELL_PRICE_SENSOR,
+    CONF_WEATHER_ENTITY,
+    DOMAIN,
+)
 
 # Config entry keys
 CONF_PV_POWER_SENSOR = "pv_power_sensor"
@@ -353,6 +358,11 @@ def _get_spot_price_sensors(hass: HomeAssistant) -> dict[str, str]:
         name = state.attributes.get("friendly_name") or entity.entity_id
         result[entity.entity_id] = f"{name} ({entity.entity_id})"
     return result
+
+
+def _get_weather_entities(hass: HomeAssistant) -> dict[str, str]:
+    """Return weather entities for provider-based EV Solar Only logic."""
+    return _get_entities_by_domain(hass, "weather")
 
 
 def _get_forecast_sensors(hass: HomeAssistant) -> dict[str, str]:
@@ -695,6 +705,11 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             power_sensors = await self.hass.async_add_executor_job(
                 _get_sensors_by_device_class, self.hass, "power", "battery"
             )
+        weather_entities: dict[str, str] = {}
+        if self._data.get(CONF_EV_CHARGING_ENABLED):
+            weather_entities = await self.hass.async_add_executor_job(
+                _get_weather_entities, self.hass
+            )
         guesses = _guess_deye_sensors(self.hass)
 
         if user_input is not None:
@@ -709,16 +724,28 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             guess = guesses.get(conf_key)
             return vol.Optional(conf_key, default=guess) if guess in power_sensors else vol.Optional(conf_key)
 
-        schema = vol.Schema(
-            {
-                _req(CONF_PV_POWER_SENSOR):      vol.In(power_sensors),
-                _opt(CONF_PV2_POWER_SENSOR):     vol.In(power_sensors),
-                _req(CONF_GRID_POWER_SENSOR):    vol.In(power_sensors),
-                _req(CONF_BATTERY_SOC_SENSOR):   vol.In(power_sensors),
-                _req(CONF_BATTERY_POWER_SENSOR): vol.In(power_sensors),
-                _req(CONF_LOAD_POWER_SENSOR):    vol.In(power_sensors),
-            }
-        )
+        schema_data: dict[Any, Any] = {
+            _req(CONF_PV_POWER_SENSOR):      vol.In(power_sensors),
+            _opt(CONF_PV2_POWER_SENSOR):     vol.In(power_sensors),
+            _req(CONF_GRID_POWER_SENSOR):    vol.In(power_sensors),
+            _req(CONF_BATTERY_SOC_SENSOR):   vol.In(power_sensors),
+            _req(CONF_BATTERY_POWER_SENSOR): vol.In(power_sensors),
+            _req(CONF_LOAD_POWER_SENSOR):    vol.In(power_sensors),
+        }
+
+        if self._data.get(CONF_EV_CHARGING_ENABLED):
+            default_weather_entity = self._data.get(CONF_WEATHER_ENTITY)
+            if default_weather_entity not in weather_entities:
+                default_weather_entity = (
+                    "weather.forecast_hjem"
+                    if "weather.forecast_hjem" in weather_entities
+                    else next(iter(weather_entities), None)
+                )
+            schema_data[
+                vol.Required(CONF_WEATHER_ENTITY, default=default_weather_entity)
+            ] = vol.In(weather_entities)
+
+        schema = vol.Schema(schema_data)
 
         matched = sum(1 for v in guesses.values() if v in power_sensors)
         description_placeholders = {"matched": str(matched), "total": str(len(_KLATREMIS_SENSOR_SUFFIXES))}
