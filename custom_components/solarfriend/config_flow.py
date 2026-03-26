@@ -66,6 +66,8 @@ CONF_DEYE_TIME_POINT_1_ENABLE  = "deye_time_point_1_enable"
 CONF_DEYE_TIME_POINT_1_START   = "deye_time_point_1_start"
 CONF_DEYE_TIME_POINT_1_CAPACITY = "deye_time_point_1_capacity"
 CONF_DEYE_GRID_CHARGE_CURRENT  = "deye_grid_charge_current"
+CONF_DEYE_MAX_BATTERY_DISCHARGE_CURRENT = "deye_max_battery_discharge_current"
+CONF_DEYE_DEFAULT_BATTERY_DISCHARGE_CURRENT = "deye_default_battery_discharge_current"
 CONF_DEYE_ENERGY_PRIORITY      = "deye_energy_priority"
 CONF_DEYE_LIMIT_CONTROL_MODE   = "deye_limit_control_mode"
 CONF_SOLAR_SELL_ENTITY         = "solar_sell_entity"
@@ -92,6 +94,7 @@ _KLATREMIS_CONTROL_SUFFIXES: dict[str, tuple[str, list[str]]] = {
     CONF_DEYE_TIME_POINT_1_START:    ("number", ["_time_point_1_start", "_time_point_1-6_start"]),
     CONF_DEYE_TIME_POINT_1_CAPACITY: ("number", ["_time_point_1_capacity", "_time_point_1-6_capacity"]),
     CONF_DEYE_GRID_CHARGE_CURRENT:   ("number", ["_maximum_battery_grid_charge_current", "_grid_charge_current"]),
+    CONF_DEYE_MAX_BATTERY_DISCHARGE_CURRENT: ("number", ["_maximum_battery_discharge_current"]),
     CONF_DEYE_ENERGY_PRIORITY:       ("select", ["_energy_priority"]),
     CONF_DEYE_LIMIT_CONTROL_MODE:    ("select", ["_limit_control_mode"]),
 }
@@ -1016,6 +1019,19 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
             else vol.Optional(CONF_SOLAR_SELL_ENTITY)
         )
 
+        default_discharge_current = self._data.get(
+            CONF_DEYE_DEFAULT_BATTERY_DISCHARGE_CURRENT,
+            0.0,
+        )
+        guessed_discharge_entity = guesses.get(CONF_DEYE_MAX_BATTERY_DISCHARGE_CURRENT)
+        if guessed_discharge_entity:
+            state = self.hass.states.get(guessed_discharge_entity)
+            if state and state.state not in ("unknown", "unavailable", ""):
+                try:
+                    default_discharge_current = float(state.state)
+                except (TypeError, ValueError):
+                    pass
+
         schema = vol.Schema(
             {
                 _opt_switch(CONF_DEYE_GRID_CHARGE_SWITCH):    vol.In(switch_entities),
@@ -1024,6 +1040,19 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
                 _opt_number(CONF_DEYE_TIME_POINT_1_START):    vol.In(number_entities),
                 _opt_number(CONF_DEYE_TIME_POINT_1_CAPACITY): vol.In(number_entities),
                 _opt_number(CONF_DEYE_GRID_CHARGE_CURRENT):   vol.In(number_entities),
+                _opt_number(CONF_DEYE_MAX_BATTERY_DISCHARGE_CURRENT): vol.In(number_entities),
+                vol.Optional(
+                    CONF_DEYE_DEFAULT_BATTERY_DISCHARGE_CURRENT,
+                    default=default_discharge_current,
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0,
+                        max=300,
+                        step=1,
+                        unit_of_measurement="A",
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
                 _opt_select(CONF_DEYE_ENERGY_PRIORITY):       vol.In(priority_entities),
                 _opt_limit_select(CONF_DEYE_LIMIT_CONTROL_MODE): vol.In(limit_mode_entities),
                 _solar_sell_field:                             vol.In(all_switch_entities),

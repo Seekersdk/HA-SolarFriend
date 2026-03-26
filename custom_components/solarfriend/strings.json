@@ -84,6 +84,8 @@
           "deye_time_point_1_start": "Time Point 1 starttidspunkt",
           "deye_time_point_1_capacity": "Time Point 1 SOC-kapacitet",
           "deye_grid_charge_current": "Maksimal netladningsstrøm",
+          "deye_max_battery_discharge_current": "Maksimal batteriafladningsstrøm",
+          "deye_default_battery_discharge_current": "Standard maksimal batteriafladningsstrøm",
           "deye_energy_priority": "Energiprioritering",
           "deye_limit_control_mode": "Limit control mode"
         }

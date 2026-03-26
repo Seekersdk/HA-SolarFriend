@@ -90,6 +90,17 @@ NUMBER_DESCRIPTIONS: tuple[SolarFriendNumberDescription, ...] = (
         mode=NumberMode.SLIDER,
         icon="mdi:transmission-tower-import",
     ),
+    SolarFriendNumberDescription(
+        key="deye_default_battery_discharge_current",
+        name="Default Battery Discharge Current",
+        config_key="deye_default_battery_discharge_current",
+        native_min_value=0,
+        native_max_value=300,
+        native_step=1,
+        native_unit_of_measurement="A",
+        mode=NumberMode.BOX,
+        icon="mdi:current-dc",
+    ),
 )
 
 
@@ -141,6 +152,7 @@ class SolarFriendNumber(RestoreEntity, NumberEntity):
             "battery_max_soc":  90.0,
             "min_charge_saving": 0.20,
             "cheap_grid_threshold": 0.10,
+            "deye_default_battery_discharge_current": 0.0,
         }
         fallback = defaults.get(description.config_key, description.native_min_value)
         self._attr_native_value = float(entry.data.get(description.config_key, fallback))
