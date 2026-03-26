@@ -41,6 +41,7 @@ class EVPlanningHelper:
         data: Any,
         now: datetime,
         departure: datetime,
+        include_battery_reserved: bool = True,
     ) -> list[EVHybridSlot]:
         """Build EV planning slots from forecast, load profile and battery plan."""
         solar_by_start: dict[datetime, float] = {}
@@ -61,19 +62,20 @@ class EVPlanningHelper:
                     continue
 
         battery_reserved_by_start: dict[datetime, float] = {}
-        for slot in data.battery_plan or []:
-            try:
-                dt = datetime.fromisoformat(str(slot["hour"]))
-                local_start = self._normalize_local_datetime(dt).replace(
-                    minute=0, second=0, microsecond=0
-                )
-                reserved_w = float(slot.get("solar_charge_w", 0.0)) + float(slot.get("grid_charge_w", 0.0))
-                battery_reserved_by_start[local_start] = max(
-                    battery_reserved_by_start.get(local_start, 0.0),
-                    reserved_w,
-                )
-            except (KeyError, TypeError, ValueError):
-                continue
+        if include_battery_reserved:
+            for slot in data.battery_plan or []:
+                try:
+                    dt = datetime.fromisoformat(str(slot["hour"]))
+                    local_start = self._normalize_local_datetime(dt).replace(
+                        minute=0, second=0, microsecond=0
+                    )
+                    reserved_w = float(slot.get("solar_charge_w", 0.0)) + float(slot.get("grid_charge_w", 0.0))
+                    battery_reserved_by_start[local_start] = max(
+                        battery_reserved_by_start.get(local_start, 0.0),
+                        reserved_w,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
 
         price_by_start: dict[datetime, float] = {}
         for entry in self._get_raw_prices():
@@ -208,7 +210,15 @@ class EVPlanningHelper:
         if charger_status == "disconnected":
             return {}
 
-        hybrid_slots = self.build_ev_hybrid_slots(data=data, now=now, departure=departure)
+        # Evaluate EV solar priority against raw forecast/load before the battery plan
+        # consumes the same solar. The later recoverability check decides whether
+        # EV is allowed to win that solar from the house battery.
+        hybrid_slots = self.build_ev_hybrid_slots(
+            data=data,
+            now=now,
+            departure=departure,
+            include_battery_reserved=False,
+        )
         if not hybrid_slots:
             return {}
 
@@ -284,7 +294,12 @@ class EVPlanningHelper:
 
         recoverable_solar_kwh = 0.0
         recovery_end = ev_next_departure + timedelta(hours=10)
-        for slot in self.build_ev_hybrid_slots(data=data, now=departure, departure=recovery_end):
+        for slot in self.build_ev_hybrid_slots(
+            data=data,
+            now=departure,
+            departure=recovery_end,
+            include_battery_reserved=False,
+        ):
             if slot.start < departure:
                 continue
             recoverable_solar_kwh += max(0.0, slot.solar_surplus_w) / 1000.0 * float(slot.duration_h)

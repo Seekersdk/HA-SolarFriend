@@ -766,7 +766,7 @@ async def async_setup_entry(
                 coordinator, "ev_min_soc_fra_km", "Min SOC fra km",
                 PERCENTAGE, SensorDeviceClass.BATTERY,
                 SensorStateClass.MEASUREMENT, "mdi:map-marker-distance",
-                lambda d: d.ev_min_soc_from_range,
+                lambda d: round(d.ev_min_soc_from_range, 1),
             ),
             SolarFriendEVSensor(
                 coordinator, "ev_nodopladning", "Nødopladning aktiv",
@@ -871,6 +871,8 @@ class SolarFriendEVSensor(CoordinatorEntity[SolarFriendCoordinator], SensorEntit
         self._attr_device_class = device_class
         self._attr_state_class = state_class
         self._attr_icon = icon
+        if key == "ev_min_soc_fra_km":
+            self._attr_suggested_display_precision = 1
 
     @property
     def device_info(self) -> DeviceInfo:
