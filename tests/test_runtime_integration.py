@@ -243,6 +243,7 @@ else:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 init_mod = importlib.import_module("custom_components.solarfriend")  # noqa: E402
+from custom_components.solarfriend.battery_tracker import BatteryTracker  # noqa: E402
 from custom_components.solarfriend.advanced_consumption_model import AdvancedConsumptionModel  # noqa: E402
 from custom_components.solarfriend.coordinator import SolarFriendCoordinator  # noqa: E402
 from custom_components.solarfriend.coordinator_policy import DEFAULT_COORDINATOR_POLICY  # noqa: E402
@@ -329,6 +330,13 @@ class _FakeHass:
         self.created_tasks.append(coro)
         coro.close()
         return None
+
+
+class _FakeServicesNoResponseKwarg(_FakeServices):
+    def async_register(self, domain: str, service: str, handler, **kwargs) -> None:
+        if "supports_response" in kwargs:
+            raise TypeError("async_register() got an unexpected keyword argument 'supports_response'")
+        super().async_register(domain, service, handler, **kwargs)
 
 
 class _FakeForecastData:
@@ -463,7 +471,10 @@ def test_async_update_data_reads_states_and_publishes_cleaned_ev_load():
     assert data.sell_price == 1.25
     assert data.forecast == 12.5
     assert data.profile_confidence == "READY"
-    assert data.consumption_profile_day_type == "weekend"
+    expected_day_type = (
+        "weekend" if coordinator_mod.ha_dt.now().weekday() >= 5 else "weekday"
+    )
+    assert data.consumption_profile_day_type == expected_day_type
     assert data.advanced_consumption_model_enabled is True
     assert data.advanced_consumption_model_state == "learning"
     assert data.advanced_consumption_model_last_weather["condition"] == "sunny"
@@ -782,6 +793,41 @@ def test_async_setup_entry_registers_service_and_stores_coordinator():
     assert len(hass.created_tasks) == 1
 
 
+def test_async_setup_entry_falls_back_when_service_registry_rejects_supports_response():
+    hass = _FakeHass()
+    hass.services = _FakeServicesNoResponseKwarg()
+    entry = _make_entry()
+
+    class _FakeCoordinator:
+        def __init__(self, hass_obj, entry_obj) -> None:
+            self.hass = hass_obj
+            self.entry = entry_obj
+
+        async def async_startup(self):
+            return None
+
+        async def async_config_entry_first_refresh(self):
+            return None
+
+        async def _trigger_optimize(self, reason="event", notify=False, force=False):
+            return None
+
+    original_cleanup = init_mod._cleanup_orphaned_ev_entities
+    original_coordinator = init_mod.SolarFriendCoordinator
+    init_mod._cleanup_orphaned_ev_entities = lambda hass_obj, entry_obj: asyncio.sleep(0)
+    init_mod.SolarFriendCoordinator = _FakeCoordinator
+    try:
+        result = asyncio.run(init_mod.async_setup_entry(hass, entry))
+    finally:
+        init_mod._cleanup_orphaned_ev_entities = original_cleanup
+        init_mod.SolarFriendCoordinator = original_coordinator
+
+    assert result is True
+    assert hass.services.has_service(init_mod.DOMAIN, init_mod.SERVICE_POPULATE_LOAD_MODEL) is True
+    assert hass.services.has_service(init_mod.DOMAIN, init_mod.SERVICE_BOOK_FLEX_LOAD) is True
+    assert hass.services.has_service(init_mod.DOMAIN, init_mod.SERVICE_CANCEL_FLEX_LOAD) is True
+
+
 def test_weather_snapshot_converts_kmh_to_mps():
     class _ForecastServices:
         async def async_call(self, domain: str, service: str, data: dict, **kwargs):
@@ -831,6 +877,39 @@ def test_weather_snapshot_converts_kmh_to_mps():
 
     assert snapshot["condition"] == "sunny"
     assert snapshot["wind_speed_mps"] == 5.0
+
+
+def test_battery_tracker_storage_load_failure_does_not_abort_startup():
+    tracker = BatteryTracker.__new__(BatteryTracker)
+    tracker._hass = _FakeHass()
+    tracker._legacy_entry_id = ""
+    tracker._battery_cost_per_kwh = 0.2
+    tracker.solar_kwh = 0.0
+    tracker.grid_kwh = 0.0
+    tracker.grid_avg_cost = 0.0
+    tracker.today_solar_direct_kwh = 0.0
+    tracker.today_solar_direct_saved_dkk = 0.0
+    tracker.today_optimizer_saved_dkk = 0.0
+    tracker.total_solar_direct_saved_dkk = 0.0
+    tracker.total_optimizer_saved_dkk = 0.0
+    tracker.today_battery_sell_kwh = 0.0
+    tracker.today_battery_sell_saved_dkk = 0.0
+    tracker.total_battery_sell_saved_dkk = 0.0
+    tracker._last_reset_date = ""
+
+    class _BrokenStore:
+        async def async_load(self):
+            raise ValueError("corrupt json")
+
+        async def async_save(self, data):
+            return None
+
+    tracker._store = _BrokenStore()
+
+    asyncio.run(tracker.async_load())
+
+    assert tracker.solar_kwh == 0.0
+    assert tracker.grid_kwh == 0.0
 
 
 def test_forecast_tracker_saves_every_minute_while_pv_is_active():

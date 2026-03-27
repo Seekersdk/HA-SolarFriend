@@ -15,6 +15,10 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+import logging
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 STORAGE_KEY = "solarfriend_advanced_consumption_model"
@@ -80,7 +84,7 @@ class AdvancedConsumptionModel:
         return Store(hass, STORAGE_VERSION, STORAGE_KEY)
 
     async def async_load(self, hass: HomeAssistant) -> None:
-        data = await self._store(hass).async_load()
+        data = await self._async_safe_load(self._store(hass))
         if not data:
             return
         self._records = dict(data.get("records", {}))
@@ -88,6 +92,19 @@ class AdvancedConsumptionModel:
         self._current_hour_sum_w = float(data.get("current_hour_sum_w", 0.0))
         self._current_hour_samples = int(data.get("current_hour_samples", 0))
         self._current_hour_weather = dict(data.get("current_hour_weather", {}))
+
+    async def _async_safe_load(self, store: Store) -> dict[str, Any] | None:
+        """Load persisted state without aborting startup on corrupted storage."""
+        try:
+            data = await store.async_load()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "AdvancedConsumptionModel storage load failed for %s; starting fresh: %s",
+                STORAGE_KEY,
+                exc,
+            )
+            return None
+        return data if isinstance(data, dict) else None
 
     async def async_save(self, hass: HomeAssistant) -> None:
         await self._store(hass).async_save(

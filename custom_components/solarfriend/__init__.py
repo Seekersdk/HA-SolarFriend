@@ -1,6 +1,7 @@
 """SolarFriend — Home Assistant integration for Deye solar inverters via ESPHome/MQTT."""
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import datetime
 from typing import Any
@@ -116,6 +117,48 @@ async def _async_handle_cancel_flex_load(hass: HomeAssistant, call: Any) -> dict
     return await coordinator.async_cancel_flex_load(str(call.data["job_id"]))
 
 
+def _async_register_service(
+    hass: HomeAssistant,
+    service: str,
+    handler: Any,
+    *,
+    supports_response: Any | None = None,
+) -> None:
+    """Register a SolarFriend service with HA-version-tolerant response support.
+
+    Some HA environments or test doubles may not accept the `supports_response`
+    kwarg yet. In that case we fall back to plain registration so the
+    integration still starts instead of failing setup.
+    """
+    if supports_response is None:
+        hass.services.async_register(DOMAIN, service, handler)
+        return
+
+    try:
+        signature = inspect.signature(hass.services.async_register)
+        supports_kwarg = "supports_response" in signature.parameters
+    except (TypeError, ValueError):
+        supports_kwarg = True
+
+    if supports_kwarg:
+        try:
+            hass.services.async_register(
+                DOMAIN,
+                service,
+                handler,
+                supports_response=supports_response,
+            )
+            return
+        except TypeError:
+            _LOGGER.warning(
+                "HA service registry rejected supports_response for %s; "
+                "registering without response support",
+                service,
+            )
+
+    hass.services.async_register(DOMAIN, service, handler)
+
+
 async def _cleanup_orphaned_ev_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Fjern legacy-entiteter for denne config entry uden at røre andre entries."""
     registry = er.async_get(hass)
@@ -155,8 +198,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def _handle_populate_load_model(call: Any) -> None:
             await _async_handle_populate_load_model(hass, call)
 
-        hass.services.async_register(
-            DOMAIN,
+        _async_register_service(
+            hass,
             SERVICE_POPULATE_LOAD_MODEL,
             _handle_populate_load_model,
         )
@@ -164,8 +207,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def _handle_book_flex_load(call: Any) -> dict[str, Any]:
             return await _async_handle_book_flex_load(hass, call)
 
-        hass.services.async_register(
-            DOMAIN,
+        _async_register_service(
+            hass,
             SERVICE_BOOK_FLEX_LOAD,
             _handle_book_flex_load,
             supports_response=SupportsResponse.ONLY,
@@ -174,8 +217,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def _handle_cancel_flex_load(call: Any) -> dict[str, Any]:
             return await _async_handle_cancel_flex_load(hass, call)
 
-        hass.services.async_register(
-            DOMAIN,
+        _async_register_service(
+            hass,
             SERVICE_CANCEL_FLEX_LOAD,
             _handle_cancel_flex_load,
             supports_response=SupportsResponse.ONLY,

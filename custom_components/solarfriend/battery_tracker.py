@@ -92,14 +92,17 @@ class BatteryTracker:
 
     async def async_load(self) -> None:
         """Load tracker state from HA storage."""
-        data: dict[str, Any] | None = await self._store.async_load()
+        data = await self._async_safe_load(self._store, STORAGE_KEY)
         if not data and self._legacy_entry_id:
             legacy_store = Store(
                 self._hass,
                 STORAGE_VERSION,
                 f"{STORAGE_KEY}_{self._legacy_entry_id}",
             )
-            data = await legacy_store.async_load()
+            data = await self._async_safe_load(
+                legacy_store,
+                f"{STORAGE_KEY}_{self._legacy_entry_id}",
+            )
             if data:
                 _LOGGER.info(
                     "BatteryTracker migrated legacy storage for entry_id=%s to stable key",
@@ -130,6 +133,23 @@ class BatteryTracker:
             self.today_solar_direct_saved_dkk,
             self.today_optimizer_saved_dkk,
         )
+
+    async def _async_safe_load(
+        self,
+        store: Store,
+        storage_key: str,
+    ) -> dict[str, Any] | None:
+        """Load persisted state without letting storage corruption abort startup."""
+        try:
+            data = await store.async_load()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "BatteryTracker storage load failed for %s; starting fresh: %s",
+                storage_key,
+                exc,
+            )
+            return None
+        return data if isinstance(data, dict) else None
 
     async def async_save(self) -> None:
         """Persist tracker state to HA storage."""
