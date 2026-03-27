@@ -69,6 +69,21 @@ def _make_model() -> ForecastCorrectionModel:
     return ForecastCorrectionModel(hass=object(), entry_id="test")
 
 
+def _weather(**overrides) -> dict:
+    snapshot = {
+        "condition": "sunny",
+        "cloud_coverage_pct": 42.0,
+        "temperature_c": 18.0,
+        "precipitation_mm": 0.0,
+        "wind_speed_mps": 3.0,
+        "wind_bearing_deg": 180.0,
+        "humidity_pct": 55.0,
+        "is_daylight": True,
+    }
+    snapshot.update(overrides)
+    return snapshot
+
+
 def test_model_persists_buckets_and_partial_day_state():
     model = _make_model()
     model._buckets[3][10].factor = 0.91
@@ -107,6 +122,9 @@ def test_model_finalizes_hour_and_learns_factor_in_daylight():
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
         sunrise=sunrise,
         sunset=sunset,
+        weather_snapshot=_weather(),
+        solar_elevation=34.0,
+        solar_azimuth=145.0,
     )
     model.update(
         now=datetime(2026, 3, 25, 11, 5),
@@ -115,6 +133,9 @@ def test_model_finalizes_hour_and_learns_factor_in_daylight():
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
         sunrise=sunrise,
         sunset=sunset,
+        weather_snapshot=_weather(),
+        solar_elevation=28.0,
+        solar_azimuth=160.0,
     )
 
     bucket = model._buckets[3][10]
@@ -134,6 +155,9 @@ def test_model_ignores_night_hours_even_if_energy_exists():
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 2, 0), 1.0)],
         sunrise=sunrise,
         sunset=sunset,
+        weather_snapshot=_weather(),
+        solar_elevation=-12.0,
+        solar_azimuth=20.0,
     )
     model.update(
         now=datetime(2026, 3, 25, 3, 5),
@@ -142,6 +166,9 @@ def test_model_ignores_night_hours_even_if_energy_exists():
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 2, 0), 1.0)],
         sunrise=sunrise,
         sunset=sunset,
+        weather_snapshot=_weather(),
+        solar_elevation=-10.0,
+        solar_azimuth=25.0,
     )
 
     assert model._buckets[3][2].samples == 0
@@ -159,6 +186,12 @@ def test_snapshot_reports_learning_state_after_five_buckets():
             _forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0),
             _forecast_slot(datetime(2026, 3, 25, 11, 0), 0.5),
         ],
+        current_environment={
+            "month": 3,
+            "solar_elevation_bucket": 30,
+            "solar_azimuth_bucket": 120,
+            "cloud_coverage_bucket": 40,
+        },
     )
 
     assert snapshot.state == "learning"
@@ -184,6 +217,9 @@ def test_rollover_finalizes_previous_day_with_previous_day_sun_window():
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
         sunrise=previous_sunrise,
         sunset=previous_sunset,
+        weather_snapshot=_weather(),
+        solar_elevation=32.0,
+        solar_azimuth=150.0,
     )
 
     model.update(
@@ -193,8 +229,55 @@ def test_rollover_finalizes_previous_day_with_previous_day_sun_window():
         hourly_forecast=[],
         sunrise=new_sunrise,
         sunset=new_sunset,
+        weather_snapshot=_weather(),
+        solar_elevation=-18.0,
+        solar_azimuth=300.0,
     )
 
     bucket = model._buckets[3][10]
     assert bucket.samples == 1
     assert round(bucket.factor, 3) == 1.0
+
+
+def test_model_learns_environment_context_bucket_and_exposes_snapshot():
+    model = _make_model()
+    sunrise = datetime(2026, 3, 25, 8, 0)
+    sunset = datetime(2026, 3, 25, 18, 0)
+
+    model.update(
+        now=datetime(2026, 3, 25, 10, 30),
+        pv_power_w=800.0,
+        dt_seconds=3600.0,
+        hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
+        sunrise=sunrise,
+        sunset=sunset,
+        weather_snapshot=_weather(cloud_coverage_pct=45.0, temperature_c=21.0),
+        solar_elevation=33.0,
+        solar_azimuth=141.0,
+    )
+    model.update(
+        now=datetime(2026, 3, 25, 11, 1),
+        pv_power_w=0.0,
+        dt_seconds=0.0,
+        hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
+        sunrise=sunrise,
+        sunset=sunset,
+        weather_snapshot=_weather(cloud_coverage_pct=50.0, temperature_c=20.0),
+        solar_elevation=28.0,
+        solar_azimuth=165.0,
+    )
+
+    snapshot = model.build_snapshot(
+        now=datetime(2026, 3, 25, 10, 45),
+        hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
+        current_environment={
+            "month": 3,
+            "solar_elevation_bucket": 30,
+            "solar_azimuth_bucket": 120,
+            "cloud_coverage_bucket": 40,
+        },
+    )
+
+    assert model._context_buckets["m3|e30|a120|c40"].samples == 1
+    assert snapshot.current_context_key == "m3|e30|a120|c40"
+    assert snapshot.last_environment["solar_elevation_bucket"] == 30

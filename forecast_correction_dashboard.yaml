@@ -1,0 +1,118 @@
+title: SolarFriend Forecast Correction Model
+views:
+  - title: Forecast Correction
+    path: solarfriend-forecast-correction
+    icon: mdi:tune-variant
+    cards:
+      - type: entities
+        title: Forecast Correction Overview
+        entities:
+          - entity: sensor.solarfriend_forecast_correction_model
+          - entity: sensor.solarfriend_forecast_correction_context_factor
+          - entity: sensor.solarfriend_forecast_correction_context_samples
+          - entity: sensor.solarfriend_forecast_accuracy_14d
+          - entity: sensor.solarfriend_forecast_actual_today_so_far
+          - entity: sensor.solarfriend_forecast_predicted_today_so_far
+          - entity: sensor.solarfriend_forecast_error_today_so_far
+
+      - type: markdown
+        title: Current Environment Context
+        content: |
+          {% set env = state_attr('sensor.solarfriend_forecast_correction_model', 'last_environment') or {} %}
+          **Month:** {{ env.month | default('N/A') }}
+          **Condition:** {{ env.condition | default('N/A') }}
+          **Cloud cover:** {{ env.cloud_coverage_pct | default('N/A') }} %
+          **Cloud bucket:** {{ env.cloud_coverage_bucket | default('N/A') }}
+          **Temperature:** {{ env.temperature_c | default('N/A') }} °C
+          **Temperature bucket:** {{ env.temperature_bucket_c | default('N/A') }} °C
+          **Humidity:** {{ env.humidity_pct | default('N/A') }} %
+          **Wind speed:** {{ env.wind_speed_mps | default('N/A') }} m/s
+          **Precipitation:** {{ env.precipitation_mm | default('N/A') }} mm
+          **Solar elevation:** {{ env.solar_elevation | default('N/A') }}°
+          **Solar elevation bucket:** {{ env.solar_elevation_bucket | default('N/A') }}
+          **Solar azimuth:** {{ env.solar_azimuth | default('N/A') }}°
+          **Solar azimuth bucket:** {{ env.solar_azimuth_bucket | default('N/A') }}
+          **Current context key:** {{ state_attr('sensor.solarfriend_forecast_correction_model', 'current_context_key') | default('N/A') }}
+
+      - type: custom:apexcharts-card
+        header:
+          title: Today Hourly vs Context Factors
+          show: true
+        graph_span: 1d
+        span:
+          start: day
+        now:
+          show: true
+          label: Nu
+        apex_config:
+          chart:
+            height: 320
+          tooltip:
+            shared: true
+        yaxis:
+          - min: 0.7
+            max: 1.3
+        series:
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Hour factor
+            color: "#4dabf7"
+            type: line
+            stroke_width: 2
+            data_generator: |
+              const rows = entity.attributes.today_hourly_factors || {};
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return Object.entries(rows).map(([hour, data]) => {
+                const h = parseInt(hour.slice(0, 2), 10);
+                return [today.getTime() + h * 3600000, data.factor];
+              });
+          - entity: sensor.solarfriend_forecast_correction_model
+            name: Context factor
+            color: "#ff922b"
+            type: line
+            stroke_width: 2
+            stroke_dash: 5
+            data_generator: |
+              const rows = entity.attributes.today_contextual_factors || {};
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return Object.entries(rows).map(([hour, data]) => {
+                const h = parseInt(hour.slice(0, 2), 10);
+                return [today.getTime() + h * 3600000, data.factor];
+              });
+
+      - type: custom:apexcharts-card
+        header:
+          title: Today Forecast vs Actual So Far
+          show: true
+        graph_span: 1d
+        span:
+          start: day
+        now:
+          show: true
+          label: Nu
+        apex_config:
+          chart:
+            height: 260
+        series:
+          - entity: sensor.solarfriend_forecast_actual_today_so_far
+            name: Actual so far
+            color: "#51cf66"
+            type: line
+            stroke_width: 3
+          - entity: sensor.solarfriend_forecast_predicted_today_so_far
+            name: Predicted so far
+            color: "#fcc419"
+            type: line
+            stroke_width: 2
+            stroke_dash: 4
+
+      - type: markdown
+        title: 14 Day Quality
+        content: |
+          {% set attrs = state_attr('sensor.solarfriend_forecast_accuracy_14d', 'history_14d') or [] %}
+          **Bias factor 14D:** {{ state_attr('sensor.solarfriend_forecast_accuracy_14d', 'bias_factor_14d') | default('N/A') }}
+          **MAE 14D:** {{ state_attr('sensor.solarfriend_forecast_accuracy_14d', 'mae_14d_kwh') | default('N/A') }} kWh
+          **MAPE 14D:** {{ state_attr('sensor.solarfriend_forecast_accuracy_14d', 'mape_14d_pct') | default('N/A') }} %
+          **Valid days 14D:** {{ state_attr('sensor.solarfriend_forecast_accuracy_14d', 'valid_days_14d') | default('N/A') }}
+          **Recent days tracked:** {{ attrs | count }}

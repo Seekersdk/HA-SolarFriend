@@ -76,6 +76,99 @@ SolarFriend tracks forecast quality over time and exposes diagnostics for:
 
 It also includes a passive month/hour forecast correction model that learns how forecast output differs from actual production throughout the year. This model is currently diagnostics-only and does not modify live control behavior.
 
+### Flexible load booking
+
+SolarFriend can also reserve future energy slots for appliances without directly controlling the appliance itself.
+
+This is intended for Home Assistant automations where:
+
+- an automation decides that a job should run
+- SolarFriend calculates the best slot
+- the automation uses the returned time to set a timer, delay, or appliance start option
+
+Examples:
+
+- dishwasher
+- washing machine
+- dryer
+- water heater
+- any other flexible appliance with a known runtime and approximate energy need
+
+The booking system is exposed as Home Assistant services:
+
+- `solarfriend.book_flex_load`
+- `solarfriend.cancel_flex_load`
+
+Important behavior:
+
+- `job_id` is mandatory and idempotent
+- reusing the same `job_id` updates/replaces the existing active reservation
+- SolarFriend does not send the actual start command in v1
+- the returned slot is meant to be consumed by your HA automation
+
+Typical request fields:
+
+- `job_id`
+- `name`
+- `duration_minutes`
+- `deadline`
+- `earliest_start` optional
+- `energy_wh` or `power_w`
+- `preferred_source`
+  - `cheap`
+  - `solar`
+- `min_solar_w` optional
+- `max_grid_w` optional
+- `allow_battery` currently stored for future policy use
+
+Typical response fields:
+
+- `operation`
+  - `created`
+  - `updated`
+- `start_time`
+- `end_time`
+- `delay_seconds`
+- `expected_solar_kwh`
+- `expected_grid_kwh`
+- `expected_cost_dkk`
+
+Recommended user flow:
+
+1. Your automation is triggered by a user action or device state.
+2. The automation calls `solarfriend.book_flex_load`.
+3. SolarFriend returns the planned slot.
+4. Your automation uses the returned `start_time` or `delay_seconds` to configure the appliance.
+
+Example service call:
+
+```yaml
+action: solarfriend.book_flex_load
+data:
+  job_id: dishwasher_tonight
+  name: Dishwasher tonight
+  duration_minutes: 150
+  deadline: "2026-03-28T06:00:00+01:00"
+  earliest_start: "2026-03-27T22:00:00+01:00"
+  energy_wh: 2000
+  preferred_source: solar
+  min_solar_w: 2000
+  max_grid_w: 300
+response_variable: booking
+```
+
+Example follow-up in the same automation:
+
+```yaml
+- action: input_datetime.set_datetime
+  target:
+    entity_id: input_datetime.dishwasher_reserved_start
+  data:
+    datetime: "{{ booking.start_time }}"
+```
+
+If the same automation runs again with the same `job_id`, SolarFriend updates the reservation instead of creating duplicates.
+
 ### EV charging optimization
 
 SolarFriend also supports optional EV charging control.

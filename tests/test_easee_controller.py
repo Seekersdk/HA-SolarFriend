@@ -87,7 +87,12 @@ def _make_state(state: str, *, unit: str = "") -> object:
 
 
 def _make_hass(state_map: dict[str, object]) -> object:
-    services = types.SimpleNamespace(async_call=lambda *a, **kw: None)
+    calls: list[tuple[str, str, dict, bool]] = []
+
+    async def _async_call(domain: str, service: str, data: dict, blocking: bool = False):
+        calls.append((domain, service, data, blocking))
+
+    services = types.SimpleNamespace(async_call=_async_call, calls=calls)
     return types.SimpleNamespace(states=_StateStore(state_map), services=services)
 
 
@@ -127,3 +132,63 @@ def test_get_power_w_keeps_w_unchanged() -> None:
     power_w = asyncio.run(controller.get_power_w())
 
     assert power_w == 1410.0
+
+
+def test_set_power_calls_dynamic_limit_service_for_three_phase() -> None:
+    hass = _make_hass(
+        {
+            "sensor.easee_status": _make_state("charging"),
+            "sensor.easee_power": _make_state("0", unit="W"),
+        }
+    )
+    controller = EaseeController(hass, _make_entry())
+    controller._entity_registry = types.SimpleNamespace(
+        async_get=lambda entity_id: types.SimpleNamespace(device_id="device-1")
+    )
+
+    asyncio.run(controller.set_power(7500.0, 3))
+
+    assert hass.services.calls == [
+        (
+            "easee",
+            "set_circuit_dynamic_limit",
+            {
+                "device_id": "device-1",
+                "current_p1": 10.6,
+                "current_p2": 10.6,
+                "current_p3": 10.6,
+            },
+            False,
+        )
+    ]
+
+
+def test_pause_and_resume_call_easee_action_command_services() -> None:
+    hass = _make_hass(
+        {
+            "sensor.easee_status": _make_state("charging"),
+            "sensor.easee_power": _make_state("0", unit="W"),
+        }
+    )
+    controller = EaseeController(hass, _make_entry())
+    controller._entity_registry = types.SimpleNamespace(
+        async_get=lambda entity_id: types.SimpleNamespace(device_id="device-1")
+    )
+
+    asyncio.run(controller.pause())
+    asyncio.run(controller.resume())
+
+    assert hass.services.calls == [
+        (
+            "easee",
+            "action_command",
+            {"device_id": "device-1", "action_command": "pause"},
+            False,
+        ),
+        (
+            "easee",
+            "action_command",
+            {"device_id": "device-1", "action_command": "resume"},
+            False,
+        ),
+    ]

@@ -47,12 +47,38 @@ class SolarFriendData:
     today_solar_direct_kwh: float = 0.0
     today_solar_direct_saved_dkk: float = 0.0
     today_optimizer_saved_dkk: float = 0.0
+    today_battery_sell_kwh: float = 0.0
+    today_battery_sell_saved_dkk: float = 0.0
     total_solar_direct_saved_dkk: float = 0.0
     total_optimizer_saved_dkk: float = 0.0
+    total_battery_sell_saved_dkk: float = 0.0
+    flex_load_reservations_count: int = 0
+    flex_load_next_name: str = ""
+    flex_load_next_start: str = ""
+    flex_load_next_end: str = ""
+    flex_load_next_power_w: float = 0.0
+    flex_load_reserved_solar_today_kwh: float = 0.0
+    flex_load_reserved_solar_tomorrow_kwh: float = 0.0
+    flex_load_reservations: list[dict[str, Any]] = field(default_factory=list)
     solar_next_2h: float = 0.0
     solar_until_sunset: float = 0.0
     consumption_profile_chart: list[float] = field(default_factory=list)
     consumption_profile_day_type: str = "weekday"
+    advanced_consumption_model_state: str = "disabled"
+    advanced_consumption_model_enabled: bool = False
+    advanced_consumption_model_records: int = 0
+    advanced_consumption_model_tracked_days: int = 0
+    advanced_consumption_model_current_hour_prediction_w: float | None = None
+    advanced_consumption_model_current_hour_actual_w: float | None = None
+    advanced_consumption_model_last_hour_actual_w: float | None = None
+    advanced_consumption_model_last_hour_prediction_w: float | None = None
+    advanced_consumption_model_last_hour_error_w: float | None = None
+    advanced_consumption_model_today_mae_w: float | None = None
+    advanced_consumption_model_7d_mae_w: float | None = None
+    advanced_consumption_model_today_hourly_actual: list[Any] = field(default_factory=list)
+    advanced_consumption_model_today_hourly_prediction: list[Any] = field(default_factory=list)
+    advanced_consumption_model_recent_daily_totals: list[dict[str, Any]] = field(default_factory=list)
+    advanced_consumption_model_last_weather: dict[str, Any] = field(default_factory=dict)
     forecast_soc_chart: list[Any] = field(default_factory=list)
     battery_plan: list[dict[str, Any]] = field(default_factory=list)
     forecast_actual_today_so_far_kwh: float = 0.0
@@ -76,9 +102,16 @@ class SolarFriendData:
     forecast_correction_confident_buckets: int = 0
     forecast_correction_average_factor_this_month: float = 1.0
     forecast_correction_today_hourly_factors: dict[str, Any] = field(default_factory=dict)
+    forecast_correction_today_contextual_factors: dict[str, Any] = field(default_factory=dict)
     forecast_correction_current_hour_factor: float = 1.0
     forecast_correction_current_hour_samples: int = 0
+    forecast_correction_active_context_buckets: int = 0
+    forecast_correction_confident_context_buckets: int = 0
+    forecast_correction_current_context_factor: float = 1.0
+    forecast_correction_current_context_samples: int = 0
+    forecast_correction_current_context_key: str = ""
     forecast_correction_raw_vs_corrected_delta_today: float = 0.0
+    forecast_correction_last_environment: dict[str, Any] = field(default_factory=dict)
     unavailable: list[str] = field(default_factory=list)
     ev_charging_enabled: bool = False
     ev_charging_power: float = 0.0

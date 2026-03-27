@@ -15,7 +15,8 @@ _LOGGER = logging.getLogger(__name__)
 class TrackerRuntimeState:
     """Mutable tracker-side timing and warning state."""
 
-    prev_update_time: datetime | None = None
+    battery_prev_update_time: datetime | None = None
+    forecast_prev_update_time: datetime | None = None
     last_tracker_save: datetime | None = None
     last_forecast_tracker_save: datetime | None = None
     last_soc_correction: datetime | None = None
@@ -46,13 +47,16 @@ class TrackerRuntime:
         load_power: float,
         battery_soc: float,
         current_price: float,
+        sell_price: float,
         previous_soc: float | None,
+        load_is_trustworthy: bool = True,
+        active_strategy: str | None = None,
     ) -> None:
         """Feed BatteryTracker with this tick's charge/discharge delta."""
-        if self._state.prev_update_time is None:
+        if self._state.battery_prev_update_time is None:
             dt_hours = 0.0
         else:
-            dt_hours = (now - self._state.prev_update_time).total_seconds() / 3600
+            dt_hours = (now - self._state.battery_prev_update_time).total_seconds() / 3600
 
         if dt_hours > 0:
             surplus_w = pv_power - load_power
@@ -66,13 +70,19 @@ class TrackerRuntime:
                 discharge_kwh = battery_power / 1000 * dt_hours
                 tracker.on_discharge(discharge_kwh)
 
-            savings_changed = tracker.update_savings(
-                pv_w=pv_power,
-                load_w=load_power,
-                battery_w=battery_power,
-                price_dkk=current_price,
-                dt_seconds=dt_hours * 3600,
-            )
+            # Deye hides/distorts house-load telemetry while exporting battery.
+            # Skip load-based savings accounting in those periods so we do not
+            # teach trackers from synthetic "grid side" measurements.
+            if load_is_trustworthy:
+                savings_changed = tracker.update_savings(
+                    pv_w=pv_power,
+                    load_w=load_power,
+                    battery_w=battery_power,
+                    price_dkk=current_price,
+                    dt_seconds=dt_hours * 3600,
+                )
+            else:
+                savings_changed = False
         else:
             savings_changed = False
 
@@ -106,6 +116,14 @@ class TrackerRuntime:
             )
             self._state.battery_sign_warned = True
 
+        if active_strategy == "SELL_BATTERY" and dt_hours > 0:
+            sell_changed = tracker.update_battery_sell_savings(
+                battery_w=max(0.0, battery_power),
+                sell_price_dkk=sell_price,
+                dt_seconds=dt_hours * 3600,
+            )
+            savings_changed = savings_changed or sell_changed
+
         save_interval = timedelta(minutes=1) if savings_changed else timedelta(minutes=15)
         if (
             self._state.last_tracker_save is None
@@ -114,7 +132,7 @@ class TrackerRuntime:
             await tracker.async_save()
             self._state.last_tracker_save = now
 
-        self._state.prev_update_time = now
+        self._state.battery_prev_update_time = now
 
     async def update_forecast_tracker(
         self,
@@ -125,10 +143,10 @@ class TrackerRuntime:
         forecast_total_today_kwh: float | None,
     ) -> None:
         """Track actual PV generation and forecast quality over time."""
-        if self._state.prev_update_time is None:
+        if self._state.forecast_prev_update_time is None:
             dt_seconds = 0.0
         else:
-            dt_seconds = (now - self._state.prev_update_time).total_seconds()
+            dt_seconds = (now - self._state.forecast_prev_update_time).total_seconds()
 
         forecast_tracker.update(
             now=now,
@@ -137,12 +155,20 @@ class TrackerRuntime:
             forecast_total_today_kwh=forecast_total_today_kwh,
         )
 
+        # Persist more aggressively while PV is active so reloads do not rewind
+        # the "actual today so far" counter by up to 15 minutes.
+        save_interval = (
+            timedelta(minutes=1)
+            if pv_power > self._policy.battery_noise_w
+            else timedelta(minutes=15)
+        )
         if (
             self._state.last_forecast_tracker_save is None
-            or (now - self._state.last_forecast_tracker_save) >= timedelta(minutes=15)
+            or (now - self._state.last_forecast_tracker_save) >= save_interval
         ):
             await forecast_tracker.async_save()
             self._state.last_forecast_tracker_save = now
+        self._state.forecast_prev_update_time = now
 
     def should_trigger_plan_deviation_replan(
         self,

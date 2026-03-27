@@ -35,6 +35,10 @@ class CoordinatorPolicy:
     plan_deviation_fraction: float = 0.25
     ev_grid_priority_margin_w: float = 200.0
     ev_battery_protection_margin_w: float = 250.0
+    # Treat EV charging as "active" once measured charging power is above
+    # this threshold. The coordinator uses it to block battery-selling while
+    # Solar Only charging is consuming the available solar directly.
+    ev_active_charge_w: float = 100.0
 
 
 DEFAULT_COORDINATOR_POLICY = CoordinatorPolicy()

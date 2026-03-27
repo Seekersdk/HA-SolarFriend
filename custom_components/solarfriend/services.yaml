@@ -19,3 +19,122 @@ populate_load_model:
       example: 0123456789abcdef0123456789abcdef
       selector:
         text:
+book_flex_load:
+  name: Book Flex Load
+  description: Create or replace a flexible-load reservation and return the planned start slot.
+  fields:
+    job_id:
+      name: Job ID
+      description: Stable idempotent key for this appliance/job. Reusing it updates the existing reservation.
+      required: true
+      example: dishwasher_tonight
+      selector:
+        text:
+    name:
+      name: Name
+      description: Friendly name used in dashboard sensors.
+      example: Dishwasher tonight
+      selector:
+        text:
+    duration_minutes:
+      name: Duration minutes
+      description: Runtime requirement for the job.
+      required: true
+      example: 150
+      selector:
+        number:
+          min: 30
+          max: 1440
+          step: 30
+          mode: box
+    deadline:
+      name: Deadline
+      description: ISO datetime by which the job must be complete.
+      required: true
+      example: 2026-03-28T06:00:00+01:00
+      selector:
+        text:
+    earliest_start:
+      name: Earliest start
+      description: Optional ISO datetime before which the job may not start.
+      example: 2026-03-27T22:00:00+01:00
+      selector:
+        text:
+    energy_wh:
+      name: Energy (Wh)
+      description: Total energy need. Optional if power_w is provided.
+      example: 2000
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 100
+          mode: box
+    power_w:
+      name: Power (W)
+      description: Average runtime power. Optional if energy_wh is provided.
+      example: 800
+      selector:
+        number:
+          min: 0
+          max: 20000
+          step: 50
+          mode: box
+    preferred_source:
+      name: Preferred source
+      description: Slot preference. Use solar for earliest solar-valid slot or cheap for lowest-cost slot.
+      default: cheap
+      selector:
+        select:
+          options:
+            - cheap
+            - solar
+    min_solar_w:
+      name: Minimum solar surplus
+      description: Optional average solar-surplus requirement for solar bookings.
+      example: 2000
+      selector:
+        number:
+          min: 0
+          max: 20000
+          step: 100
+          mode: box
+    max_grid_w:
+      name: Maximum grid power
+      description: Optional per-slot grid cap. Slots that need more grid than this are rejected.
+      example: 500
+      selector:
+        number:
+          min: 0
+          max: 20000
+          step: 100
+          mode: box
+    allow_battery:
+      name: Allow battery
+      description: Reserved for future policy use. Currently booking is based on solar and grid only.
+      default: false
+      selector:
+        boolean:
+    entry_id:
+      name: Entry ID
+      description: Optional config entry id. Required when multiple SolarFriend entries exist.
+      example: 0123456789abcdef0123456789abcdef
+      selector:
+        text:
+cancel_flex_load:
+  name: Cancel Flex Load
+  description: Cancel an existing flexible-load reservation by job id.
+  fields:
+    job_id:
+      name: Job ID
+      description: Reservation key to cancel.
+      required: true
+      example: dishwasher_tonight
+      selector:
+        text:
+    entry_id:
+      name: Entry ID
+      description: Optional config entry id. Required when multiple SolarFriend entries exist.
+      example: 0123456789abcdef0123456789abcdef
+      selector:
+        text:

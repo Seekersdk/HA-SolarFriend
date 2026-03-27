@@ -2,20 +2,33 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as ha_dt
 
 from .const import (
     CONF_BUY_PRICE_SENSOR,
     CONF_SELL_PRICE_SENSOR,
     DOMAIN,
+    SERVICE_BOOK_FLEX_LOAD,
+    SERVICE_CANCEL_FLEX_LOAD,
     SERVICE_POPULATE_LOAD_MODEL,
 )
 from .coordinator import SolarFriendCoordinator
+
+try:
+    from homeassistant.core import SupportsResponse
+except ImportError:  # pragma: no cover - test shim
+    class SupportsResponse:  # type: ignore[override]
+        """Fallback enum for lightweight test environments."""
+
+        NONE = "none"
+        ONLY = "only"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +52,68 @@ async def _async_handle_populate_load_model(hass: HomeAssistant, call: Any) -> N
         entries = await coordinator.async_force_populate_load_model(days)
         if entries > 0:
             await coordinator.async_request_refresh()
+
+
+def _resolve_target_coordinator(hass: HomeAssistant, entry_id: str | None) -> SolarFriendCoordinator:
+    """Resolve the targeted SolarFriend coordinator for a service call."""
+    coordinators: dict[str, SolarFriendCoordinator] = hass.data.get(DOMAIN, {})
+    if entry_id:
+        if entry_id not in coordinators:
+            raise ValueError(f"Unknown SolarFriend entry_id: {entry_id}")
+        return coordinators[entry_id]
+    if len(coordinators) == 1:
+        return next(iter(coordinators.values()))
+    raise ValueError("entry_id is required when multiple SolarFriend entries exist")
+
+
+async def _async_handle_book_flex_load(hass: HomeAssistant, call: Any) -> dict[str, Any]:
+    """Book or replace a flexible load slot and return the computed reservation."""
+    coordinator = _resolve_target_coordinator(hass, call.data.get("entry_id"))
+    parse_datetime = getattr(ha_dt, "parse_datetime", None)
+    deadline = (
+        parse_datetime(str(call.data["deadline"]))
+        if parse_datetime is not None
+        else datetime.fromisoformat(str(call.data["deadline"]))
+    )
+    earliest_raw = call.data.get("earliest_start")
+    earliest_start = (
+        (
+            parse_datetime(str(earliest_raw))
+            if parse_datetime is not None
+            else datetime.fromisoformat(str(earliest_raw))
+        )
+        if earliest_raw
+        else None
+    )
+    if deadline is None:
+        raise ValueError("deadline must be a valid ISO datetime")
+    return await coordinator.async_book_flex_load(
+        job_id=str(call.data["job_id"]),
+        name=str(call.data.get("name") or call.data["job_id"]),
+        duration_minutes=int(call.data["duration_minutes"]),
+        deadline=deadline,
+        earliest_start=earliest_start,
+        preferred_source=str(call.data.get("preferred_source", "cheap")),
+        energy_wh=float(call.data.get("energy_wh", 0.0) or 0.0),
+        power_w=float(call.data.get("power_w", 0.0) or 0.0),
+        min_solar_w=(
+            float(call.data["min_solar_w"])
+            if call.data.get("min_solar_w") is not None
+            else None
+        ),
+        max_grid_w=(
+            float(call.data["max_grid_w"])
+            if call.data.get("max_grid_w") is not None
+            else None
+        ),
+        allow_battery=bool(call.data.get("allow_battery", False)),
+    )
+
+
+async def _async_handle_cancel_flex_load(hass: HomeAssistant, call: Any) -> dict[str, Any]:
+    """Cancel an existing flex-load reservation."""
+    coordinator = _resolve_target_coordinator(hass, call.data.get("entry_id"))
+    return await coordinator.async_cancel_flex_load(str(call.data["job_id"]))
 
 
 async def _cleanup_orphaned_ev_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -85,6 +160,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SERVICE_POPULATE_LOAD_MODEL,
             _handle_populate_load_model,
         )
+    if not hass.services.has_service(DOMAIN, SERVICE_BOOK_FLEX_LOAD):
+        async def _handle_book_flex_load(call: Any) -> dict[str, Any]:
+            return await _async_handle_book_flex_load(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_BOOK_FLEX_LOAD,
+            _handle_book_flex_load,
+            supports_response=SupportsResponse.ONLY,
+        )
+    if not hass.services.has_service(DOMAIN, SERVICE_CANCEL_FLEX_LOAD):
+        async def _handle_cancel_flex_load(call: Any) -> dict[str, Any]:
+            return await _async_handle_cancel_flex_load(hass, call)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_CANCEL_FLEX_LOAD,
+            _handle_cancel_flex_load,
+            supports_response=SupportsResponse.ONLY,
+        )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -100,6 +195,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id)
-        if not hass.data[DOMAIN] and hass.services.has_service(DOMAIN, SERVICE_POPULATE_LOAD_MODEL):
-            hass.services.async_remove(DOMAIN, SERVICE_POPULATE_LOAD_MODEL)
+        if not hass.data[DOMAIN]:
+            for service in (
+                SERVICE_POPULATE_LOAD_MODEL,
+                SERVICE_BOOK_FLEX_LOAD,
+                SERVICE_CANCEL_FLEX_LOAD,
+            ):
+                if hass.services.has_service(DOMAIN, service):
+                    hass.services.async_remove(DOMAIN, service)
     return unloaded

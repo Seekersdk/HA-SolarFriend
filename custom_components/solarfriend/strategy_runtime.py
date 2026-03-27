@@ -1,7 +1,7 @@
 """Battery strategy hold/hysteresis runtime helper."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -129,3 +129,54 @@ class StrategyRuntime:
             return desired_result, True
 
         return active_result, False
+
+    def apply_runtime_overrides(
+        self,
+        result: Any,
+        *,
+        battery_sell_enabled: bool,
+        ev_enabled: bool,
+        ev_charge_mode: str,
+        ev_currently_charging: bool,
+        ev_charging_power: float,
+    ) -> Any:
+        """Apply runtime gating on top of the pure optimizer result."""
+        if result.strategy != "SELL_BATTERY":
+            return result
+
+        ev_actively_charging = bool(
+            ev_enabled
+            and ev_charge_mode == "solar_only"
+            and (
+                ev_currently_charging
+                or float(ev_charging_power) > self._policy.ev_active_charge_w
+            )
+        )
+        if ev_actively_charging:
+            return replace(
+                result,
+                strategy="SAVE_SOLAR",
+                reason=(
+                    "Battery sell er blokeret, fordi EV lader aktivt i solar_only. "
+                    f"{result.reason}"
+                ),
+                solar_sell=True,
+            )
+
+        if battery_sell_enabled:
+            return result
+
+        return replace(
+            result,
+            strategy="USE_BATTERY",
+            reason=(
+                "Battery sell er deaktiveret af bruger-override. "
+                f"{result.reason}"
+            ),
+            solar_sell=True,
+        )
+
+    @staticmethod
+    def load_learning_allowed(result: Any | None) -> bool:
+        """Return True when live load/grid telemetry is safe to learn from."""
+        return result is None or result.strategy != "SELL_BATTERY"

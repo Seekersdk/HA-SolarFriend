@@ -1,0 +1,47 @@
+title: SolarFriend Flex Loads
+views:
+  - title: Flex Loads
+    path: solarfriend-flex-loads
+    cards:
+      - type: entities
+        title: Flex Load Oversigt
+        show_header_toggle: false
+        entities:
+          - entity: sensor.solarfriend_flex_load_reservations
+            name: Aktive reservationer
+          - entity: sensor.solarfriend_flex_load_next_name
+            name: Næste job
+          - entity: sensor.solarfriend_flex_load_next_start
+            name: Næste start
+          - entity: sensor.solarfriend_flex_load_next_power
+            name: Næste effekt
+          - entity: sensor.solarfriend_flex_load_reserved_solar_today
+            name: Reserveret sol i dag
+          - entity: sensor.solarfriend_flex_load_reserved_solar_tomorrow
+            name: Reserveret sol i morgen
+
+      - type: markdown
+        title: Booking Service
+        content: |
+          Brug `solarfriend.book_flex_load` fra en automation.
+
+          Eksempel:
+          ```yaml
+          action: solarfriend.book_flex_load
+          data:
+            job_id: dishwasher_tonight
+            name: Opvasker
+            duration_minutes: 150
+            energy_wh: 2000
+            deadline: 2026-03-28T06:00:00+01:00
+            preferred_source: solar
+            min_solar_w: 2000
+          response_variable: booking
+          ```
+
+      - type: entities
+        title: Nuværende Reservede Jobs
+        show_header_toggle: false
+        entities:
+          - entity: sensor.solarfriend_flex_load_reservations
+            name: Reservede jobs

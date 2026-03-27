@@ -1,0 +1,116 @@
+title: SolarFriend Advanced Consumption Model
+views:
+  - title: Advanced Load
+    path: solarfriend-advanced-load
+    icon: mdi:chart-timeline-variant
+    cards:
+      - type: entities
+        title: Advanced Consumption Model
+        entities:
+          - entity: switch.solarfriend_use_advanced_consumption_model
+          - entity: sensor.solarfriend_advanced_consumption_model_state
+          - entity: sensor.solarfriend_advanced_consumption_model_records
+          - entity: sensor.solarfriend_advanced_consumption_model_tracked_days
+          - entity: sensor.solarfriend_advanced_consumption_model_current_hour_prediction
+          - entity: sensor.solarfriend_advanced_consumption_model_current_hour_actual
+          - entity: sensor.solarfriend_advanced_consumption_model_last_hour_actual
+          - entity: sensor.solarfriend_advanced_consumption_model_last_hour_prediction
+          - entity: sensor.solarfriend_advanced_consumption_model_last_hour_error
+          - entity: sensor.solarfriend_advanced_consumption_model_today_mae
+          - entity: sensor.solarfriend_advanced_consumption_model_7d_mae
+
+      - type: markdown
+        title: Weather Snapshot
+        content: |
+          **Condition:** {{ state_attr('sensor.solarfriend_advanced_consumption_model_chart', 'last_weather_snapshot').condition | default('N/A') }}
+          **Cloud cover:** {{ state_attr('sensor.solarfriend_advanced_consumption_model_chart', 'last_weather_snapshot').cloud_coverage_pct | default('N/A') }} %
+          **Temperature:** {{ state_attr('sensor.solarfriend_advanced_consumption_model_chart', 'last_weather_snapshot').temperature_c | default('N/A') }} °C
+          **Precipitation:** {{ state_attr('sensor.solarfriend_advanced_consumption_model_chart', 'last_weather_snapshot').precipitation_mm | default('N/A') }} mm
+          **Wind speed:** {{ state_attr('sensor.solarfriend_advanced_consumption_model_chart', 'last_weather_snapshot').wind_speed_mps | default('N/A') }} m/s
+          **Wind bearing:** {{ state_attr('sensor.solarfriend_advanced_consumption_model_chart', 'last_weather_snapshot').wind_bearing_deg | default('N/A') }}°
+          **Daylight:** {{ state_attr('sensor.solarfriend_advanced_consumption_model_chart', 'last_weather_snapshot').is_daylight | default('N/A') }}
+          **Heating season:** {{ state_attr('sensor.solarfriend_advanced_consumption_model_chart', 'last_weather_snapshot').is_heating_season | default('N/A') }}
+
+      - type: custom:apexcharts-card
+        header:
+          title: Advanced Model Today
+          show: true
+        graph_span: 1d
+        span:
+          start: day
+        now:
+          show: true
+          label: Nu
+        apex_config:
+          chart:
+            height: 340
+          tooltip:
+            shared: true
+        yaxis:
+          - id: power
+            min: 0
+        series:
+          - entity: sensor.solarfriend_advanced_consumption_model_chart
+            name: Actual
+            color: "#ff6b6b"
+            type: line
+            stroke_width: 2
+            yaxis_id: power
+            unit: W
+            data_generator: |
+              const profile = entity.attributes.hourly_actual || [];
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return profile
+                .map((watt, hour) => watt !== null ? [
+                  today.getTime() + hour * 3600000,
+                  watt
+                ] : null)
+                .filter(v => v !== null);
+          - entity: sensor.solarfriend_advanced_consumption_model_chart
+            name: Prediction
+            color: "#4dabf7"
+            type: line
+            stroke_width: 2
+            stroke_dash: 5
+            yaxis_id: power
+            unit: W
+            data_generator: |
+              const profile = entity.attributes.hourly_prediction || [];
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              return profile
+                .map((watt, hour) => watt !== null ? [
+                  today.getTime() + hour * 3600000,
+                  watt
+                ] : null)
+                .filter(v => v !== null);
+
+      - type: custom:apexcharts-card
+        header:
+          title: Advanced Model Recent Daily Totals
+          show: true
+        graph_span: 14d
+        now:
+          show: false
+        apex_config:
+          chart:
+            height: 300
+          xaxis:
+            type: datetime
+        yaxis:
+          - id: energy
+            min: 0
+        series:
+          - entity: sensor.solarfriend_advanced_consumption_model_chart
+            name: Daily total
+            color: "#51cf66"
+            type: column
+            yaxis_id: energy
+            unit: kWh
+            data_generator: |
+              const rows = entity.attributes.recent_daily_totals || [];
+              return rows.map(row => [
+                new Date(row.day).getTime(),
+                row.total_kwh_equivalent || 0
+              ]);

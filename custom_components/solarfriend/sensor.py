@@ -100,11 +100,45 @@ def _forecast_correction_model_attrs(d: "SolarFriendData", cfg: dict) -> dict:
         "current_month": d.forecast_correction_current_month,
         "active_buckets": d.forecast_correction_active_buckets,
         "confident_buckets": d.forecast_correction_confident_buckets,
+        "active_context_buckets": d.forecast_correction_active_context_buckets,
+        "confident_context_buckets": d.forecast_correction_confident_context_buckets,
         "average_factor_this_month": d.forecast_correction_average_factor_this_month,
         "today_hourly_factors": d.forecast_correction_today_hourly_factors,
+        "today_contextual_factors": d.forecast_correction_today_contextual_factors,
         "current_hour_factor": d.forecast_correction_current_hour_factor,
         "current_hour_samples": d.forecast_correction_current_hour_samples,
+        "current_context_factor": d.forecast_correction_current_context_factor,
+        "current_context_samples": d.forecast_correction_current_context_samples,
+        "current_context_key": d.forecast_correction_current_context_key,
         "raw_vs_corrected_delta_today": d.forecast_correction_raw_vs_corrected_delta_today,
+        "last_environment": d.forecast_correction_last_environment,
+    }
+
+
+def _advanced_consumption_chart_attrs(d: "SolarFriendData", cfg: dict) -> dict:
+    """Expose advanced model chart series and weather snapshot for dashboards."""
+    return {
+        "hourly_actual": d.advanced_consumption_model_today_hourly_actual,
+        "hourly_prediction": d.advanced_consumption_model_today_hourly_prediction,
+        "records_count": d.advanced_consumption_model_records,
+        "tracked_days": d.advanced_consumption_model_tracked_days,
+        "today_mae_w": d.advanced_consumption_model_today_mae_w,
+        "rolling_7d_mae_w": d.advanced_consumption_model_7d_mae_w,
+        "recent_daily_totals": d.advanced_consumption_model_recent_daily_totals,
+        "last_weather_snapshot": d.advanced_consumption_model_last_weather,
+    }
+
+
+def _flex_load_attrs(d: "SolarFriendData", cfg: dict) -> dict:
+    """Expose flex-load reservation details for dashboards and automations."""
+    return {
+        "next_name": d.flex_load_next_name,
+        "next_start": d.flex_load_next_start,
+        "next_end": d.flex_load_next_end,
+        "next_power_w": d.flex_load_next_power_w,
+        "reserved_solar_today_kwh": d.flex_load_reserved_solar_today_kwh,
+        "reserved_solar_tomorrow_kwh": d.flex_load_reserved_solar_tomorrow_kwh,
+        "reservations": d.flex_load_reservations,
     }
 
 
@@ -296,6 +330,24 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         value_fn=lambda d, _: round(d.today_optimizer_saved_dkk, 2),
     ),
     SolarFriendSensorDescription(
+        key="today_battery_sell_export",
+        name="Batteri solgt i dag",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        icon="mdi:battery-arrow-up",
+        value_fn=lambda d, _: round(d.today_battery_sell_kwh, 3),
+    ),
+    SolarFriendSensorDescription(
+        key="today_battery_sell_saving",
+        name="Batterisalg i dag",
+        native_unit_of_measurement=UNIT_KR,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=None,
+        icon="mdi:cash-fast",
+        value_fn=lambda d, _: round(d.today_battery_sell_saved_dkk, 2),
+    ),
+    SolarFriendSensorDescription(
         key="total_solar_saving",
         name="Total sparet på sol",
         native_unit_of_measurement=UNIT_KR,
@@ -314,6 +366,70 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         value_fn=lambda d, _: round(d.total_optimizer_saved_dkk, 2),
     ),
     # --- Optimizer: strategy (with attributes) ---
+    SolarFriendSensorDescription(
+        key="total_battery_sell_saving",
+        name="Total batterisalg",
+        native_unit_of_measurement=UNIT_KR,
+        device_class=None,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        icon="mdi:cash-multiple",
+        value_fn=lambda d, _: round(d.total_battery_sell_saved_dkk, 2),
+    ),
+    SolarFriendSensorDescription(
+        key="flex_load_reservations",
+        name="Flex Load Reservations",
+        native_unit_of_measurement="jobs",
+        device_class=None,
+        state_class=None,
+        icon="mdi:calendar-clock",
+        value_fn=lambda d, _: d.flex_load_reservations_count,
+        extra_attrs_fn=lambda d, cfg: _flex_load_attrs(d, cfg),
+    ),
+    SolarFriendSensorDescription(
+        key="flex_load_next_name",
+        name="Flex Load Next Name",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        icon="mdi:playlist-play",
+        value_fn=lambda d, _: d.flex_load_next_name or "Ingen booking",
+    ),
+    SolarFriendSensorDescription(
+        key="flex_load_next_start",
+        name="Flex Load Next Start",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        icon="mdi:clock-start",
+        value_fn=lambda d, _: d.flex_load_next_start or "Ingen booking",
+    ),
+    SolarFriendSensorDescription(
+        key="flex_load_next_power",
+        name="Flex Load Next Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:flash-outline",
+        value_fn=lambda d, _: round(d.flex_load_next_power_w, 1),
+    ),
+    SolarFriendSensorDescription(
+        key="flex_load_reserved_solar_today",
+        name="Flex Load Reserved Solar Today",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        icon="mdi:solar-power-variant",
+        value_fn=lambda d, _: round(d.flex_load_reserved_solar_today_kwh, 3),
+    ),
+    SolarFriendSensorDescription(
+        key="flex_load_reserved_solar_tomorrow",
+        name="Flex Load Reserved Solar Tomorrow",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        icon="mdi:weather-sunny-alert",
+        value_fn=lambda d, _: round(d.flex_load_reserved_solar_tomorrow_kwh, 3),
+    ),
     SolarFriendSensorDescription(
         key="optimizer_strategy",
         name="Optimizer Strategy",
@@ -593,6 +709,24 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         value_fn=lambda d, _: d.forecast_correction_model_state,
         extra_attrs_fn=lambda d, cfg: _forecast_correction_model_attrs(d, cfg),
     ),
+    SolarFriendSensorDescription(
+        key="forecast_correction_context_factor",
+        name="Forecast Correction Context Factor",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:weather-partly-cloudy",
+        value_fn=lambda d, _: round(d.forecast_correction_current_context_factor, 4),
+    ),
+    SolarFriendSensorDescription(
+        key="forecast_correction_context_samples",
+        name="Forecast Correction Context Samples",
+        native_unit_of_measurement="samples",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:counter",
+        value_fn=lambda d, _: d.forecast_correction_current_context_samples,
+    ),
     # --- Forecast SOC chart ---
     # apexcharts-card data_generator example:
     #
@@ -679,6 +813,111 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
             "weekday_samples_per_hour": d.consumption_profile_debug.get("weekday", {}).get("samples_per_hour", {}),
             "weekend_samples_per_hour": d.consumption_profile_debug.get("weekend", {}).get("samples_per_hour", {}),
         },
+    ),
+    # --- Advanced consumption model ---
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_state",
+        name="Advanced Consumption Model State",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        icon="mdi:chart-timeline-variant",
+        value_fn=lambda d, _: d.advanced_consumption_model_state,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_records",
+        name="Advanced Consumption Model Records",
+        native_unit_of_measurement="records",
+        device_class=None,
+        state_class=None,
+        icon="mdi:database",
+        value_fn=lambda d, _: d.advanced_consumption_model_records,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_tracked_days",
+        name="Advanced Consumption Model Tracked Days",
+        native_unit_of_measurement="days",
+        device_class=None,
+        state_class=None,
+        icon="mdi:calendar-range",
+        value_fn=lambda d, _: d.advanced_consumption_model_tracked_days,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_current_hour_prediction",
+        name="Advanced Consumption Model Current Hour Prediction",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:chart-bell-curve-cumulative",
+        value_fn=lambda d, _: d.advanced_consumption_model_current_hour_prediction_w,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_current_hour_actual",
+        name="Advanced Consumption Model Current Hour Actual",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:gauge",
+        value_fn=lambda d, _: d.advanced_consumption_model_current_hour_actual_w,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_last_hour_actual",
+        name="Advanced Consumption Model Last Hour Actual",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:clock-check-outline",
+        value_fn=lambda d, _: d.advanced_consumption_model_last_hour_actual_w,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_last_hour_prediction",
+        name="Advanced Consumption Model Last Hour Prediction",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:clock-outline",
+        value_fn=lambda d, _: d.advanced_consumption_model_last_hour_prediction_w,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_last_hour_error",
+        name="Advanced Consumption Model Last Hour Error",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:chart-line-variant",
+        value_fn=lambda d, _: d.advanced_consumption_model_last_hour_error_w,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_today_mae",
+        name="Advanced Consumption Model Today MAE",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:target",
+        value_fn=lambda d, _: d.advanced_consumption_model_today_mae_w,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_7d_mae",
+        name="Advanced Consumption Model 7D MAE",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:calendar-week",
+        value_fn=lambda d, _: d.advanced_consumption_model_7d_mae_w,
+    ),
+    SolarFriendSensorDescription(
+        key="advanced_consumption_model_chart",
+        name="Advanced Consumption Model Chart",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:chart-box-outline",
+        value_fn=lambda d, _: (
+            d.advanced_consumption_model_current_hour_actual_w
+            if d.advanced_consumption_model_current_hour_actual_w is not None
+            else d.advanced_consumption_model_current_hour_prediction_w
+        ),
+        extra_attrs_fn=lambda d, cfg: _advanced_consumption_chart_attrs(d, cfg),
     ),
 )
 

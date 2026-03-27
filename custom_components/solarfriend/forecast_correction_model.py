@@ -1,4 +1,4 @@
-"""Passive month/hour forecast correction model."""
+"""Passive forecast correction model with hour and environment-aware buckets."""
 from __future__ import annotations
 
 import logging
@@ -11,7 +11,7 @@ from homeassistant.helpers.storage import Store
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
 STORAGE_KEY = "solarfriend_forecast_correction"
 _MIN_VALID_KWH = 0.15
 _MIN_EARLY_SAMPLES = 5
@@ -32,6 +32,15 @@ class HourBucket:
 
 
 @dataclass
+class ContextBucket:
+    """Learned correction state for one month/environment bucket."""
+
+    factor: float = 1.0
+    samples: int = 0
+    avg_abs_error_kwh: float = 0.0
+
+
+@dataclass
 class CorrectionModelSnapshot:
     """Compact diagnostics snapshot for sensor exposure."""
 
@@ -41,9 +50,16 @@ class CorrectionModelSnapshot:
     confident_buckets: int = 0
     average_factor_this_month: float = 1.0
     today_hourly_factors: dict[str, dict[str, float]] = field(default_factory=dict)
+    today_contextual_factors: dict[str, dict[str, float]] = field(default_factory=dict)
     current_hour_factor: float = 1.0
     current_hour_samples: int = 0
+    active_context_buckets: int = 0
+    confident_context_buckets: int = 0
+    current_context_factor: float = 1.0
+    current_context_samples: int = 0
+    current_context_key: str = ""
     raw_vs_corrected_delta_today: float = 0.0
+    last_environment: dict[str, Any] = field(default_factory=dict)
 
 
 class ForecastCorrectionModel:
@@ -57,9 +73,11 @@ class ForecastCorrectionModel:
             month: {hour: HourBucket() for hour in range(24)}
             for month in range(1, 13)
         }
+        self._context_buckets: dict[str, ContextBucket] = {}
         self._today_date: str = ""
         self._today_actual_kwh_by_hour: dict[int, float] = {}
         self._today_raw_forecast_kwh_by_hour: dict[int, float] = {}
+        self._today_context_by_hour: dict[int, dict[str, Any]] = {}
         self._finalized_hours: set[int] = set()
         self._today_sunrise: datetime | None = None
         self._today_sunset: datetime | None = None
@@ -103,6 +121,14 @@ class ForecastCorrectionModel:
                     samples=int(bucket.get("samples", 0)),
                     avg_abs_error_kwh=float(bucket.get("avg_abs_error_kwh", 0.0)),
                 )
+        self._context_buckets = {
+            str(key): ContextBucket(
+                factor=float(bucket.get("factor", 1.0)),
+                samples=int(bucket.get("samples", 0)),
+                avg_abs_error_kwh=float(bucket.get("avg_abs_error_kwh", 0.0)),
+            )
+            for key, bucket in (data.get("context_buckets", {}) or {}).items()
+        }
 
         self._today_date = str(data.get("today_date", ""))
         self._today_actual_kwh_by_hour = {
@@ -112,6 +138,10 @@ class ForecastCorrectionModel:
         self._today_raw_forecast_kwh_by_hour = {
             int(hour): float(value)
             for hour, value in (data.get("today_raw_forecast_kwh_by_hour", {}) or {}).items()
+        }
+        self._today_context_by_hour = {
+            int(hour): dict(value)
+            for hour, value in (data.get("today_context_by_hour", {}) or {}).items()
         }
         self._finalized_hours = {
             int(hour)
@@ -135,6 +165,14 @@ class ForecastCorrectionModel:
                     }
                     for month, hours in self._buckets.items()
                 },
+                "context_buckets": {
+                    key: {
+                        "factor": round(bucket.factor, 4),
+                        "samples": bucket.samples,
+                        "avg_abs_error_kwh": round(bucket.avg_abs_error_kwh, 4),
+                    }
+                    for key, bucket in self._context_buckets.items()
+                },
                 "today_date": self._today_date,
                 "today_actual_kwh_by_hour": {
                     str(hour): round(value, 6)
@@ -143,6 +181,10 @@ class ForecastCorrectionModel:
                 "today_raw_forecast_kwh_by_hour": {
                     str(hour): round(value, 6)
                     for hour, value in self._today_raw_forecast_kwh_by_hour.items()
+                },
+                "today_context_by_hour": {
+                    str(hour): context
+                    for hour, context in self._today_context_by_hour.items()
                 },
                 "finalized_hours": sorted(self._finalized_hours),
                 "today_sunrise": self._today_sunrise.isoformat() if self._today_sunrise else None,
@@ -159,6 +201,9 @@ class ForecastCorrectionModel:
         hourly_forecast: list[dict[str, Any]] | None,
         sunrise: datetime | None,
         sunset: datetime | None,
+        weather_snapshot: dict[str, Any] | None,
+        solar_elevation: float | None,
+        solar_azimuth: float | None,
     ) -> None:
         """Update current-day actuals and finalize completed buckets when possible."""
         self._rollover_if_needed(now.date(), sunrise, sunset)
@@ -172,6 +217,14 @@ class ForecastCorrectionModel:
             self._today_actual_kwh_by_hour[now.hour] = self._today_actual_kwh_by_hour.get(now.hour, 0.0) + (
                 pv_power_w * dt_seconds / 3_600_000
             )
+        context = self._build_hour_context(
+            now=now,
+            weather_snapshot=weather_snapshot or {},
+            solar_elevation=solar_elevation,
+            solar_azimuth=solar_azimuth,
+        )
+        if context:
+            self._today_context_by_hour[now.hour] = context
 
         self._finalize_completed_hours(now, sunrise, sunset)
 
@@ -180,6 +233,7 @@ class ForecastCorrectionModel:
         *,
         now: datetime,
         hourly_forecast: list[dict[str, Any]] | None,
+        current_environment: dict[str, Any] | None = None,
     ) -> CorrectionModelSnapshot:
         """Build compact diagnostics data for the current month/day."""
         month = now.month
@@ -187,24 +241,55 @@ class ForecastCorrectionModel:
         active = [bucket for bucket in buckets.values() if bucket.samples >= _MIN_EARLY_SAMPLES]
         confident = [bucket for bucket in buckets.values() if bucket.samples >= _MIN_CONFIDENT_SAMPLES]
         current_bucket = buckets[now.hour]
+        active_context = [
+            bucket for bucket in self._context_buckets.values() if bucket.samples >= _MIN_EARLY_SAMPLES
+        ]
+        confident_context = [
+            bucket for bucket in self._context_buckets.values() if bucket.samples >= _MIN_CONFIDENT_SAMPLES
+        ]
+        current_context_key = self._context_key_from_snapshot(current_environment or {})
+        current_context_bucket = self._context_buckets.get(current_context_key, ContextBucket())
 
         today_forecast = self._forecast_by_hour_for_date(now.date(), hourly_forecast)
         today_hourly_factors: dict[str, dict[str, float]] = {}
+        today_contextual_factors: dict[str, dict[str, float]] = {}
         raw_total = 0.0
         corrected_total = 0.0
         for hour, raw_kwh in sorted(today_forecast.items()):
             if raw_kwh <= 0:
                 continue
             bucket = buckets[hour]
-            factor = self._effective_factor(bucket)
+            hour_factor = self._effective_factor(bucket)
+            context_snapshot = self._today_context_by_hour.get(hour, {})
+            context_key = self._context_key_from_snapshot(context_snapshot)
+            context_bucket = self._context_buckets.get(context_key)
+            context_factor = (
+                self._effective_context_factor(context_bucket)
+                if context_bucket is not None
+                else 1.0
+            )
+            factor = context_factor if context_bucket is not None else hour_factor
             today_hourly_factors[f"{hour:02d}:00"] = {
-                "factor": round(factor, 4),
+                "factor": round(hour_factor, 4),
                 "samples": float(bucket.samples),
             }
+            if context_snapshot:
+                today_contextual_factors[f"{hour:02d}:00"] = {
+                    "factor": round(factor, 4),
+                    "samples": float(context_bucket.samples if context_bucket is not None else 0),
+                    "solar_elevation_bucket": context_snapshot.get("solar_elevation_bucket"),
+                    "solar_azimuth_bucket": context_snapshot.get("solar_azimuth_bucket"),
+                    "cloud_coverage_bucket": context_snapshot.get("cloud_coverage_bucket"),
+                    "temperature_bucket_c": context_snapshot.get("temperature_bucket_c"),
+                }
             raw_total += raw_kwh
             corrected_total += raw_kwh * factor
 
-        if confident:
+        if confident_context:
+            state = "ready"
+        elif active_context:
+            state = "learning"
+        elif confident:
             state = "ready"
         elif active:
             state = "learning"
@@ -224,9 +309,16 @@ class ForecastCorrectionModel:
             confident_buckets=len(confident),
             average_factor_this_month=round(avg_factor, 4),
             today_hourly_factors=today_hourly_factors,
+            today_contextual_factors=today_contextual_factors,
             current_hour_factor=round(self._effective_factor(current_bucket), 4),
             current_hour_samples=current_bucket.samples,
+            active_context_buckets=len(active_context),
+            confident_context_buckets=len(confident_context),
+            current_context_factor=round(self._effective_context_factor(current_context_bucket), 4),
+            current_context_samples=current_context_bucket.samples,
+            current_context_key=current_context_key,
             raw_vs_corrected_delta_today=round(corrected_total - raw_total, 4),
+            last_environment=dict(current_environment or self._today_context_by_hour.get(now.hour, {})),
         )
 
     def _rollover_if_needed(
@@ -250,6 +342,7 @@ class ForecastCorrectionModel:
         self._today_date = today.isoformat()
         self._today_actual_kwh_by_hour = {}
         self._today_raw_forecast_kwh_by_hour = {}
+        self._today_context_by_hour = {}
         self._finalized_hours = set()
         self._today_sunrise = sunrise
         self._today_sunset = sunset
@@ -299,20 +392,44 @@ class ForecastCorrectionModel:
             bucket.factor = observed_factor
             bucket.samples = 1
             bucket.avg_abs_error_kwh = abs(actual_kwh - raw_forecast_kwh)
-            return
+        else:
+            alpha = 1.0 / min(bucket.samples + 1, 12)
+            bucket.factor = max(
+                _MIN_FACTOR,
+                min(
+                    _MAX_FACTOR,
+                    bucket.factor + max(-_MAX_FACTOR_DELTA, min(_MAX_FACTOR_DELTA, observed_factor - bucket.factor)) * alpha,
+                ),
+            )
+            bucket.avg_abs_error_kwh = (
+                (bucket.avg_abs_error_kwh * bucket.samples) + abs(actual_kwh - raw_forecast_kwh)
+            ) / (bucket.samples + 1)
+            bucket.samples += 1
 
-        alpha = 1.0 / min(bucket.samples + 1, 12)
-        bucket.factor = max(
+        context_key = self._context_key_for_hour(hour)
+        if not context_key:
+            return
+        context_bucket = self._context_buckets.get(context_key)
+        if context_bucket is None:
+            self._context_buckets[context_key] = ContextBucket(
+                factor=observed_factor,
+                samples=1,
+                avg_abs_error_kwh=abs(actual_kwh - raw_forecast_kwh),
+            )
+            return
+        alpha = 1.0 / min(context_bucket.samples + 1, 12)
+        context_bucket.factor = max(
             _MIN_FACTOR,
             min(
                 _MAX_FACTOR,
-                bucket.factor + max(-_MAX_FACTOR_DELTA, min(_MAX_FACTOR_DELTA, observed_factor - bucket.factor)) * alpha,
+                context_bucket.factor
+                + max(-_MAX_FACTOR_DELTA, min(_MAX_FACTOR_DELTA, observed_factor - context_bucket.factor)) * alpha,
             ),
         )
-        bucket.avg_abs_error_kwh = (
-            (bucket.avg_abs_error_kwh * bucket.samples) + abs(actual_kwh - raw_forecast_kwh)
-        ) / (bucket.samples + 1)
-        bucket.samples += 1
+        context_bucket.avg_abs_error_kwh = (
+            (context_bucket.avg_abs_error_kwh * context_bucket.samples) + abs(actual_kwh - raw_forecast_kwh)
+        ) / (context_bucket.samples + 1)
+        context_bucket.samples += 1
 
     @staticmethod
     def _iter_forecast_entries(hourly_forecast: list[dict[str, Any]]) -> list[tuple[datetime, float]]:
@@ -366,6 +483,102 @@ class ForecastCorrectionModel:
             return 1.0
         confidence = min(1.0, max(0.0, (bucket.samples - _MIN_EARLY_SAMPLES + 1) / (_MIN_CONFIDENT_SAMPLES - _MIN_EARLY_SAMPLES + 1)))
         return 1.0 + (bucket.factor - 1.0) * confidence
+
+    @staticmethod
+    def _effective_context_factor(bucket: ContextBucket) -> float:
+        if bucket.samples < _MIN_EARLY_SAMPLES:
+            return 1.0
+        confidence = min(
+            1.0,
+            max(
+                0.0,
+                (bucket.samples - _MIN_EARLY_SAMPLES + 1)
+                / (_MIN_CONFIDENT_SAMPLES - _MIN_EARLY_SAMPLES + 1),
+            ),
+        )
+        return 1.0 + (bucket.factor - 1.0) * confidence
+
+    def _context_key_for_hour(self, hour: int) -> str:
+        return self._context_key_from_snapshot(self._today_context_by_hour.get(hour, {}))
+
+    def _context_key_from_snapshot(self, snapshot: dict[str, Any]) -> str:
+        month = snapshot.get("month")
+        elevation = snapshot.get("solar_elevation_bucket")
+        azimuth = snapshot.get("solar_azimuth_bucket")
+        cloud = snapshot.get("cloud_coverage_bucket")
+        if elevation is None:
+            elevation = self._elevation_bucket(snapshot.get("solar_elevation"))
+        if azimuth is None:
+            azimuth = self._azimuth_bucket(snapshot.get("solar_azimuth"))
+        if cloud is None:
+            cloud = self._cloud_bucket(snapshot.get("cloud_coverage_pct"))
+        if None in (month, elevation, azimuth, cloud):
+            return ""
+        return f"m{int(month)}|e{int(elevation)}|a{int(azimuth)}|c{int(cloud)}"
+
+    def _build_hour_context(
+        self,
+        *,
+        now: datetime,
+        weather_snapshot: dict[str, Any],
+        solar_elevation: float | None,
+        solar_azimuth: float | None,
+    ) -> dict[str, Any]:
+        cloud_coverage = weather_snapshot.get("cloud_coverage_pct")
+        temperature_c = weather_snapshot.get("temperature_c")
+        return {
+            "month": now.month,
+            "hour": now.hour,
+            "condition": weather_snapshot.get("condition"),
+            "cloud_coverage_pct": cloud_coverage,
+            "cloud_coverage_bucket": self._cloud_bucket(cloud_coverage),
+            "temperature_c": temperature_c,
+            "temperature_bucket_c": self._temperature_bucket(temperature_c),
+            "precipitation_mm": weather_snapshot.get("precipitation_mm"),
+            "wind_speed_mps": weather_snapshot.get("wind_speed_mps"),
+            "wind_bearing_deg": weather_snapshot.get("wind_bearing_deg"),
+            "humidity_pct": weather_snapshot.get("humidity_pct"),
+            "is_daylight": weather_snapshot.get("is_daylight"),
+            "solar_elevation": solar_elevation,
+            "solar_elevation_bucket": self._elevation_bucket(solar_elevation),
+            "solar_azimuth": solar_azimuth,
+            "solar_azimuth_bucket": self._azimuth_bucket(solar_azimuth),
+        }
+
+    @staticmethod
+    def _elevation_bucket(value: Any) -> int | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        clamped = max(-10.0, min(90.0, numeric))
+        return int((clamped // 10) * 10)
+
+    @staticmethod
+    def _azimuth_bucket(value: Any) -> int | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        normalized = numeric % 360.0
+        return int((normalized // 30) * 30)
+
+    @staticmethod
+    def _cloud_bucket(value: Any) -> int | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        clamped = max(0.0, min(100.0, numeric))
+        return int((clamped // 20) * 20)
+
+    @staticmethod
+    def _temperature_bucket(value: Any) -> int | None:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return int((numeric // 5) * 5)
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:

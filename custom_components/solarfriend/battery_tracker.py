@@ -10,7 +10,7 @@ from homeassistant.helpers.storage import Store
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
 STORAGE_KEY = "solarfriend_battery_tracker"
 _DRIFT_THRESHOLD = 0.10  # log warning if tracker drifts >10% from actual SOC
 
@@ -38,6 +38,9 @@ class BatteryTracker:
         self.today_optimizer_saved_dkk: float = 0.0
         self.total_solar_direct_saved_dkk: float = 0.0
         self.total_optimizer_saved_dkk: float = 0.0
+        self.today_battery_sell_kwh: float = 0.0
+        self.today_battery_sell_saved_dkk: float = 0.0
+        self.total_battery_sell_saved_dkk: float = 0.0
         self._last_reset_date: str = ""
 
     @property
@@ -82,6 +85,11 @@ class BatteryTracker:
         """Lifetime optimizer saving including today's running total."""
         return self.total_optimizer_saved_dkk + self.today_optimizer_saved_dkk
 
+    @property
+    def live_total_battery_sell_saved_dkk(self) -> float:
+        """Lifetime battery-sell value including today's running total."""
+        return self.total_battery_sell_saved_dkk + self.today_battery_sell_saved_dkk
+
     async def async_load(self) -> None:
         """Load tracker state from HA storage."""
         data: dict[str, Any] | None = await self._store.async_load()
@@ -109,6 +117,9 @@ class BatteryTracker:
         self.today_optimizer_saved_dkk = float(data.get("today_optimizer_saved_dkk", 0.0))
         self.total_solar_direct_saved_dkk = float(data.get("total_solar_direct_saved_dkk", 0.0))
         self.total_optimizer_saved_dkk = float(data.get("total_optimizer_saved_dkk", 0.0))
+        self.today_battery_sell_kwh = float(data.get("today_battery_sell_kwh", 0.0))
+        self.today_battery_sell_saved_dkk = float(data.get("today_battery_sell_saved_dkk", 0.0))
+        self.total_battery_sell_saved_dkk = float(data.get("total_battery_sell_saved_dkk", 0.0))
         self._last_reset_date = data.get("last_reset_date", "")
         _LOGGER.debug(
             "BatteryTracker loaded: solar=%.3f kWh grid=%.3f kWh avg_cost=%.4f "
@@ -132,6 +143,9 @@ class BatteryTracker:
                 "today_optimizer_saved_dkk": round(self.today_optimizer_saved_dkk, 4),
                 "total_solar_direct_saved_dkk": round(self.total_solar_direct_saved_dkk, 4),
                 "total_optimizer_saved_dkk": round(self.total_optimizer_saved_dkk, 4),
+                "today_battery_sell_kwh": round(self.today_battery_sell_kwh, 6),
+                "today_battery_sell_saved_dkk": round(self.today_battery_sell_saved_dkk, 4),
+                "total_battery_sell_saved_dkk": round(self.total_battery_sell_saved_dkk, 4),
                 "last_reset_date": self._last_reset_date,
                 "last_updated": datetime.now(timezone.utc).isoformat(),
             }
@@ -216,18 +230,42 @@ class BatteryTracker:
         if self._last_reset_date and self._last_reset_date != today:
             self.total_solar_direct_saved_dkk += self.today_solar_direct_saved_dkk
             self.total_optimizer_saved_dkk += self.today_optimizer_saved_dkk
+            self.total_battery_sell_saved_dkk += self.today_battery_sell_saved_dkk
             self.today_solar_direct_kwh = 0.0
             self.today_solar_direct_saved_dkk = 0.0
             self.today_optimizer_saved_dkk = 0.0
+            self.today_battery_sell_kwh = 0.0
+            self.today_battery_sell_saved_dkk = 0.0
             rolled = True
             _LOGGER.info(
-                "BatteryTracker: new day %s -> total_sol=%.2f kr total_opt=%.2f kr",
+                "BatteryTracker: new day %s -> total_sol=%.2f kr total_opt=%.2f kr total_sell=%.2f kr",
                 today,
                 self.total_solar_direct_saved_dkk,
                 self.total_optimizer_saved_dkk,
+                self.total_battery_sell_saved_dkk,
             )
         self._last_reset_date = today
         return rolled
+
+    def update_battery_sell_savings(
+        self,
+        *,
+        battery_w: float,
+        sell_price_dkk: float,
+        dt_seconds: float,
+    ) -> bool:
+        """Track gross battery-export value during SELL_BATTERY runtime."""
+        if dt_seconds <= 0 or sell_price_dkk <= 0 or battery_w <= 0:
+            return False
+
+        changed = self._check_midnight_reset()
+        sell_kwh = battery_w * dt_seconds / 3_600_000
+        if sell_kwh <= 0:
+            return changed
+
+        self.today_battery_sell_kwh += sell_kwh
+        self.today_battery_sell_saved_dkk += sell_kwh * sell_price_dkk
+        return True
 
     def update_savings(
         self,
@@ -269,5 +307,8 @@ class BatteryTracker:
         self.today_optimizer_saved_dkk = 0.0
         self.total_solar_direct_saved_dkk = 0.0
         self.total_optimizer_saved_dkk = 0.0
+        self.today_battery_sell_kwh = 0.0
+        self.today_battery_sell_saved_dkk = 0.0
+        self.total_battery_sell_saved_dkk = 0.0
         self._last_reset_date = ""
         _LOGGER.debug("BatteryTracker reset")

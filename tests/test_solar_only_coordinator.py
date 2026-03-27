@@ -82,6 +82,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from custom_components.solarfriend.coordinator import SolarFriendCoordinator  # noqa: E402
 from custom_components.solarfriend.battery_optimizer import OptimizeResult  # noqa: E402
+from custom_components.solarfriend.coordinator_policy import DEFAULT_COORDINATOR_POLICY  # noqa: E402
 from custom_components.solarfriend.ev_optimizer import EVContext, EVOptimizeResult, EVOptimizer  # noqa: E402
 from custom_components.solarfriend.weather_profile import CLOUDY_PROFILE, PARTLY_CLOUDY_PROFILE  # noqa: E402
 import custom_components.solarfriend.coordinator as coordinator_mod  # noqa: E402
@@ -89,6 +90,7 @@ import custom_components.solarfriend.coordinator as coordinator_mod  # noqa: E40
 
 def _make_coordinator() -> SolarFriendCoordinator:
     coordinator = SolarFriendCoordinator.__new__(SolarFriendCoordinator)
+    coordinator._policy = DEFAULT_COORDINATOR_POLICY
     coordinator._ev_optimizer = EVOptimizer()
     coordinator._ev_solar_start_candidate_since = None
     coordinator._ev_solar_stop_candidate_since = None
@@ -144,7 +146,7 @@ def test_solar_only_start_hysteresis_requires_full_hold_time():
     coordinator = _make_coordinator()
     start_time = datetime(2026, 3, 26, 12, 0, 0)
 
-    blocked = coordinator._apply_solar_only_hysteresis(
+    blocked = coordinator._ensure_ev_runtime().apply_solar_only_hysteresis(
         ctx=_make_ctx(now=start_time),
         result=_make_result(should_charge=True, surplus_w=2100.0),
         profile=PARTLY_CLOUDY_PROFILE,
@@ -155,7 +157,7 @@ def test_solar_only_start_hysteresis_requires_full_hold_time():
     assert blocked.target_w == 0.0
     assert "Start hysterese" in blocked.reason
 
-    allowed = coordinator._apply_solar_only_hysteresis(
+    allowed = coordinator._ensure_ev_runtime().apply_solar_only_hysteresis(
         ctx=_make_ctx(now=start_time + timedelta(minutes=5)),
         result=_make_result(should_charge=True, surplus_w=2100.0),
         profile=PARTLY_CLOUDY_PROFILE,
@@ -171,7 +173,7 @@ def test_solar_only_stop_hysteresis_holds_charging_with_buffer():
     coordinator = _make_coordinator()
     stop_time = datetime(2026, 3, 26, 12, 0, 0)
 
-    held = coordinator._apply_solar_only_hysteresis(
+    held = coordinator._ensure_ev_runtime().apply_solar_only_hysteresis(
         ctx=_make_ctx(now=stop_time, currently_charging=True),
         result=_make_result(
             should_charge=False,
@@ -189,7 +191,7 @@ def test_solar_only_stop_hysteresis_holds_charging_with_buffer():
     assert held.target_w >= 1410.0
     assert "Stop hysterese" in held.reason
 
-    stopped = coordinator._apply_solar_only_hysteresis(
+    stopped = coordinator._ensure_ev_runtime().apply_solar_only_hysteresis(
         ctx=_make_ctx(now=stop_time + timedelta(minutes=10), currently_charging=True),
         result=_make_result(
             should_charge=False,
@@ -267,8 +269,67 @@ def test_battery_sell_override_demotes_sell_battery_to_use_battery():
         solar_sell=True,
     )
 
-    overridden = coordinator._apply_optimizer_runtime_overrides(result)
+    overridden = coordinator._ensure_strategy_runtime().apply_runtime_overrides(
+        result,
+        battery_sell_enabled=coordinator.battery_sell_enabled,
+        ev_enabled=getattr(coordinator, "_ev_enabled", False),
+        ev_charge_mode=getattr(coordinator, "ev_charge_mode", ""),
+        ev_currently_charging=(
+            getattr(coordinator, "_ev_runtime", None) is not None
+            and coordinator._ev_runtime.currently_charging
+        ),
+        ev_charging_power=(
+            float(coordinator.data.ev_charging_power)
+            if getattr(coordinator, "data", None) is not None
+            else 0.0
+        ),
+    )
 
     assert overridden.strategy == "USE_BATTERY"
     assert "deaktiveret af bruger-override" in overridden.reason
     assert overridden.solar_sell is True
+
+
+def test_ev_solar_only_charging_blocks_sell_battery_even_when_enabled():
+    coordinator = _make_coordinator()
+    coordinator.battery_sell_enabled = True
+    coordinator._ev_enabled = True
+    coordinator.ev_charge_mode = "solar_only"
+    coordinator._ev_runtime = types.SimpleNamespace(currently_charging=True)
+    coordinator.data = types.SimpleNamespace(ev_charging_power=2800.0)
+
+    result = OptimizeResult(
+        strategy="SELL_BATTERY",
+        reason="Sælger batteri nu",
+        target_soc=None,
+        charge_now=False,
+        cheapest_charge_hour=None,
+        night_charge_kwh=0.0,
+        morning_need_kwh=0.0,
+        day_deficit_kwh=0.0,
+        peak_need_kwh=0.0,
+        expected_saving_dkk=2.5,
+        weighted_battery_cost=0.3,
+        solar_fraction=0.5,
+        best_discharge_hours=[],
+        solar_sell=True,
+    )
+
+    overridden = coordinator._ensure_strategy_runtime().apply_runtime_overrides(
+        result,
+        battery_sell_enabled=coordinator.battery_sell_enabled,
+        ev_enabled=getattr(coordinator, "_ev_enabled", False),
+        ev_charge_mode=getattr(coordinator, "ev_charge_mode", ""),
+        ev_currently_charging=(
+            getattr(coordinator, "_ev_runtime", None) is not None
+            and coordinator._ev_runtime.currently_charging
+        ),
+        ev_charging_power=(
+            float(coordinator.data.ev_charging_power)
+            if getattr(coordinator, "data", None) is not None
+            else 0.0
+        ),
+    )
+
+    assert overridden.strategy == "SAVE_SOLAR"
+    assert "EV lader aktivt i solar_only" in overridden.reason

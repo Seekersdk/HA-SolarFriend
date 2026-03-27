@@ -76,6 +76,9 @@ class SolarFriendEVModeSelect(RestoreEntity, SelectEntity):
         self._current_option = option
         self._coordinator.ev_charge_mode = option
         self.async_write_ha_state()
+        await self._coordinator.async_on_runtime_setting_changed(
+            reason="select-ev_charge_mode-updated"
+        )
         _LOGGER.info("EV ladetilstand ændret til: %s", option)
 
 
@@ -110,6 +113,10 @@ class SolarFriendEVDepartureSelect(RestoreEntity, SelectEntity):
         self._current_option = option
         self._coordinator.ev_departure_time = self._parse(option)
         self.async_write_ha_state()
+        if self._coordinator.ev_charge_mode in {"hybrid", "grid_schedule"}:
+            await self._coordinator.async_on_runtime_setting_changed(
+                reason="select-ev_departure_time-updated"
+            )
         _LOGGER.info("EV afgangstid sat til %s", option)
 
     @staticmethod
