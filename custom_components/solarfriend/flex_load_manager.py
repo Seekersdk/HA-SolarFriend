@@ -96,7 +96,15 @@ class FlexLoadReservationManager:
 
     async def async_load(self) -> None:
         """Load reservations from HA storage."""
-        data: dict[str, Any] | None = await self._store.async_load()
+        try:
+            data: dict[str, Any] | None = await self._store.async_load()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "FlexLoadReservationManager storage load failed for %s; starting fresh: %s",
+                f"{STORAGE_KEY}.{self._entry_id}",
+                exc,
+            )
+            return
         if not data:
             return
         reservations = data.get("reservations", {})

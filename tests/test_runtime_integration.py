@@ -247,6 +247,7 @@ from custom_components.solarfriend.battery_tracker import BatteryTracker  # noqa
 from custom_components.solarfriend.advanced_consumption_model import AdvancedConsumptionModel  # noqa: E402
 from custom_components.solarfriend.coordinator import SolarFriendCoordinator  # noqa: E402
 from custom_components.solarfriend.coordinator_policy import DEFAULT_COORDINATOR_POLICY  # noqa: E402
+from custom_components.solarfriend.forecast_correction_model import ForecastCorrectionModel  # noqa: E402
 from custom_components.solarfriend.price_adapter import PriceData  # noqa: E402
 from custom_components.solarfriend.select import (  # noqa: E402
     SolarFriendEVDepartureSelect,
@@ -910,6 +911,35 @@ def test_battery_tracker_storage_load_failure_does_not_abort_startup():
 
     assert tracker.solar_kwh == 0.0
     assert tracker.grid_kwh == 0.0
+
+
+def test_forecast_correction_storage_load_failure_does_not_abort_startup():
+    model = ForecastCorrectionModel.__new__(ForecastCorrectionModel)
+    model._hass = _FakeHass()
+    model._legacy_entry_id = ""
+    model._buckets = {month: {hour: types.SimpleNamespace(factor=1.0, samples=0, avg_abs_error_kwh=0.0) for hour in range(24)} for month in range(1, 13)}
+    model._context_buckets = {}
+    model._today_date = ""
+    model._today_actual_kwh_by_hour = {}
+    model._today_raw_forecast_kwh_by_hour = {}
+    model._today_context_by_hour = {}
+    model._finalized_hours = set()
+    model._today_sunrise = None
+    model._today_sunset = None
+
+    class _BrokenStore:
+        async def async_load(self):
+            raise ValueError("corrupt json")
+
+        async def async_save(self, data):
+            return None
+
+    model._store = _BrokenStore()
+
+    asyncio.run(model.async_load())
+
+    assert model._today_date == ""
+    assert model._context_buckets == {}
 
 
 def test_forecast_tracker_saves_every_minute_while_pv_is_active():

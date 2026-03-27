@@ -273,7 +273,15 @@ class ConsumptionProfile:
 
     async def async_load(self, hass: HomeAssistant) -> None:
         """Load profiles from HA storage. Keeps defaults if no data found."""
-        data: dict[str, Any] | None = await self._store(hass).async_load()
+        try:
+            data: dict[str, Any] | None = await self._store(hass).async_load()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "ConsumptionProfile storage load failed for %s; starting fresh: %s",
+                STORAGE_KEY,
+                exc,
+            )
+            return
         if not data:
             _LOGGER.debug("ConsumptionProfile: no stored data, starting fresh")
             return

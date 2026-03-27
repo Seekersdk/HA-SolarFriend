@@ -84,14 +84,17 @@ class ForecastCorrectionModel:
 
     async def async_load(self) -> None:
         """Load persisted buckets and current-day partial data."""
-        data = await self._store.async_load()
+        data = await self._async_safe_load(self._store, STORAGE_KEY)
         if not data and self._legacy_entry_id:
             legacy_store = Store(
                 self._hass,
                 STORAGE_VERSION,
                 f"{STORAGE_KEY}_{self._legacy_entry_id}",
             )
-            data = await legacy_store.async_load()
+            data = await self._async_safe_load(
+                legacy_store,
+                f"{STORAGE_KEY}_{self._legacy_entry_id}",
+            )
             if data:
                 _LOGGER.info(
                     "ForecastCorrectionModel migrated legacy storage for entry_id=%s to stable key",
@@ -149,6 +152,23 @@ class ForecastCorrectionModel:
         }
         self._today_sunrise = self._parse_datetime(data.get("today_sunrise"))
         self._today_sunset = self._parse_datetime(data.get("today_sunset"))
+
+    async def _async_safe_load(
+        self,
+        store: Store,
+        storage_key: str,
+    ) -> dict[str, Any] | None:
+        """Load persisted state without aborting startup on corruption."""
+        try:
+            data = await store.async_load()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "ForecastCorrectionModel storage load failed for %s; starting fresh: %s",
+                storage_key,
+                exc,
+            )
+            return None
+        return data if isinstance(data, dict) else None
 
     async def async_save(self) -> None:
         """Persist buckets and current-day partial state."""
