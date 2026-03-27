@@ -48,7 +48,13 @@ class EaseeController(EVChargerController):
             return 0.0
         state = self._hass.states.get(self._power_entity)
         try:
-            return float(state.state) if state else 0.0
+            if not state:
+                return 0.0
+            value = float(state.state)
+            unit = str(state.attributes.get("unit_of_measurement", "")).lower()
+            if unit == "kw":
+                return value * 1000.0
+            return value
         except (ValueError, TypeError):
             return 0.0
 
