@@ -370,34 +370,61 @@ class DeyeController(InverterController):
     async def _set_switch(self, entity_id: str | None, state: bool) -> None:
         if not entity_id:
             return
-        await self.hass.services.async_call(
-            "switch",
-            "turn_on" if state else "turn_off",
-            {"entity_id": entity_id},
-            blocking=True,
-        )
+        try:
+            await self.hass.services.async_call(
+                "switch",
+                "turn_on" if state else "turn_off",
+                {"entity_id": entity_id},
+                blocking=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "DeyeController: failed to set switch %s -> %s: %s",
+                entity_id,
+                "ON" if state else "OFF",
+                exc,
+            )
+            return
         _LOGGER.debug("Deye: %s -> %s", entity_id, "ON" if state else "OFF")
 
     async def _set_number(self, entity_id: str | None, value: float) -> None:
         if not entity_id:
             return
-        await self.hass.services.async_call(
-            "number",
-            "set_value",
-            {"entity_id": entity_id, "value": value},
-            blocking=True,
-        )
+        try:
+            await self.hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": entity_id, "value": value},
+                blocking=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "DeyeController: failed to set number %s -> %s: %s",
+                entity_id,
+                value,
+                exc,
+            )
+            return
         _LOGGER.debug("Deye: %s -> %s", entity_id, value)
 
     async def _set_select(self, entity_id: str | None, option: str) -> None:
         if not entity_id:
             return
-        await self.hass.services.async_call(
-            "select",
-            "select_option",
-            {"entity_id": entity_id, "option": option},
-            blocking=True,
-        )
+        try:
+            await self.hass.services.async_call(
+                "select",
+                "select_option",
+                {"entity_id": entity_id, "option": option},
+                blocking=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "DeyeController: failed to set select %s -> %s: %s",
+                entity_id,
+                option,
+                exc,
+            )
+            return
         _LOGGER.debug("Deye: %s -> %s", entity_id, option)
 
     @staticmethod
