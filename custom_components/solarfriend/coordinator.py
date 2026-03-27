@@ -1,23 +1,28 @@
-"""SolarFriend DataUpdateCoordinator.
+"""SolarFriend coordinator.
 
-Coordinator responsibility:
-- Orchestrate polling, runtime state and Home Assistant side effects.
-- Delegate EV planning to `ev_planning.py`.
-- Delegate structured replay logging to `shadow_logging.py`.
-- Keep battery optimization in `battery_optimizer.py`.
+Mini guide for AI/code bots:
+- `coordinator.py`: thin orchestration layer and update order.
+- `coordinator_models.py`: shared snapshot model plus EV device metadata helper.
+- `coordinator_policy.py`: coordinator-side thresholds and timing policy.
+- `price_runtime.py`: rolling price state and cached price snapshots.
+- `strategy_runtime.py`: battery strategy hysteresis and confirmation logic.
+- `tracker_runtime.py`: tracker cadence, SOC correction cadence, plan deviation checks.
+- `state_reader.py`: raw sensor reads and live load cleanup.
+- `weather_service.py` / `weather_profile.py`: weather fetch/cache and Solar Only profile mapping.
+- `ev_runtime_controller.py`: EV anti-flap and Solar Only runtime hysteresis.
+- `ev_planning.py`: EV slot planning and EV-vs-battery reservation logic.
+- `battery_optimizer.py`: battery planning and economics.
+- `shadow_logging.py`: replay-friendly shadow logs.
 
-When adding new logic, prefer these homes:
-- EV slot building / EV preview / EV-vs-battery priority: `ev_planning.py`
-- Shadow-log payloads and file writes: `shadow_logging.py`
-- Battery economics and horizon planning: `battery_optimizer.py`
-- Consumption learning and historical seeding: `consumption_profile.py`
+Maintenance rule:
+- Prefer adding policy/runtime logic in dedicated helper files.
+- Keep this file focused on orchestration, data flow order and cross-service wiring.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
-import statistics
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable
@@ -48,9 +53,14 @@ from .vehicle_controller import VehicleController
 from .ev_optimizer import EVContext, EVHybridSlot, EVOptimizer
 from .ev_planning import EVPlanningHelper
 from .ev_runtime_controller import EVRuntimeController
+from .coordinator_models import SolarFriendData, ev_device_info
+from .coordinator_policy import DEFAULT_COORDINATOR_POLICY
+from .price_runtime import PriceRuntime
 from .runtime_config import build_runtime_components, refresh_optimizer_runtime_settings
 from .shadow_logging import ShadowLogger
 from .state_reader import SolarFriendStateReader
+from .strategy_runtime import StrategyRuntime
+from .tracker_runtime import TrackerRuntime
 from .weather_profile import SolarOnlyWeatherProfile
 from .weather_service import WeatherProfileService
 
@@ -240,11 +250,14 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=UPDATE_INTERVAL,
+            update_interval=DEFAULT_COORDINATOR_POLICY.update_interval,
         )
         self._entry = entry
         self.config_entry = entry  # public alias for use by entity unique_ids
-        self._price_history: list[float] = []
+        self._policy = DEFAULT_COORDINATOR_POLICY
+        self._price_runtime = PriceRuntime(self._policy)
+        self._strategy_runtime = StrategyRuntime(self._policy, config_entry=entry)
+        self._tracker_runtime = TrackerRuntime(self._policy, config_entry=entry)
         self._night_prices: dict[int, float] = {}  # hour → min price seen this night
         self._cached_buy_price_data: PriceData | None = None
         self._cached_sell_price_data: PriceData | None = None
@@ -445,13 +458,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
 
     def _reset_pending_strategy(self) -> None:
-        self._pending_strategy = None
-        self._pending_strategy_count = 0
+        self._ensure_strategy_runtime().reset_pending()
 
     def _mark_strategy_applied(self, result: OptimizeResult, now: datetime, pv_power: float) -> None:
-        self._active_strategy_since = now
-        self._active_strategy_reference_pv = max(0.0, pv_power)
-        self._reset_pending_strategy()
+        # Compatibility wrapper. New code should call StrategyRuntime directly.
+        self._ensure_strategy_runtime()._mark_applied(result, now, pv_power)
 
     def _strategy_override_allowed(
         self,
@@ -463,42 +474,16 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         pv_power: float,
         sunset: datetime,
     ) -> bool:
-        """Allow immediate strategy switch on major regime changes or safety limits."""
-        now = _normalize_local_datetime(now)
-        sunset = _normalize_local_datetime(sunset)
-
-        if desired_result.strategy == "ANTI_EXPORT":
-            return True
-
-        cfg = self._entry.data
-        min_soc = float(cfg.get("battery_min_soc", 10.0))
-        max_soc = float(cfg.get("battery_max_soc", 100.0))
-        if current_soc <= (min_soc + SOC_OVERRIDE_MARGIN):
-            return True
-        if current_soc >= (max_soc - SOC_OVERRIDE_MARGIN):
-            return True
-
-        if desired_result.strategy == active_result.strategy:
-            return True
-
-        if now >= sunset:
-            return True
-
-        solar_remaining = self.data.solar_until_sunset if self.data else 0.0
-        if desired_result.strategy == "SAVE_SOLAR" and solar_remaining <= SUNSET_OVERRIDE_REMAINING_KWH:
-            return True
-
-        reference_pv = max(0.0, self._active_strategy_reference_pv)
-        pv_drop_w = max(0.0, reference_pv - max(0.0, pv_power))
-        if reference_pv > 0:
-            pv_drop_fraction = pv_drop_w / reference_pv
-            if (
-                pv_drop_w >= PV_DROP_OVERRIDE_MIN_W
-                and pv_drop_fraction >= PV_DROP_OVERRIDE_FRACTION
-            ):
-                return True
-
-        return False
+        """Compatibility wrapper around StrategyRuntime override logic."""
+        return self._ensure_strategy_runtime()._override_allowed(
+            active_result,
+            desired_result,
+            now=now,
+            current_soc=current_soc,
+            pv_power=pv_power,
+            sunset=sunset,
+            solar_until_sunset_kwh=self.data.solar_until_sunset if self.data else 0.0,
+        )
 
     def _select_strategy_result(
         self,
@@ -509,42 +494,16 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         pv_power: float,
         sunset: datetime,
     ) -> tuple[OptimizeResult, bool]:
-        """Apply hysteresis/hold logic and return (result_to_apply, strategy_changed)."""
-        active_result = self.data.optimize_result if self.data else None
-        if active_result is None:
-            self._mark_strategy_applied(desired_result, now, pv_power)
-            return desired_result, True
-
-        if desired_result.strategy == active_result.strategy:
-            self._reset_pending_strategy()
-            return desired_result, False
-
-        if self._strategy_override_allowed(
-            active_result,
+        """Compatibility wrapper around StrategyRuntime selection logic."""
+        return self._ensure_strategy_runtime().select_result(
             desired_result,
+            active_result=self.data.optimize_result if self.data else None,
             now=now,
             current_soc=current_soc,
             pv_power=pv_power,
             sunset=sunset,
-        ):
-            self._mark_strategy_applied(desired_result, now, pv_power)
-            return desired_result, True
-
-        if self._pending_strategy == desired_result.strategy:
-            self._pending_strategy_count += 1
-        else:
-            self._pending_strategy = desired_result.strategy
-            self._pending_strategy_count = 1
-
-        hold_elapsed = (
-            self._active_strategy_since is None
-            or (now - self._active_strategy_since) >= STRATEGY_SOFT_COOLDOWN
+            solar_until_sunset_kwh=self.data.solar_until_sunset if self.data else 0.0,
         )
-        if hold_elapsed and self._pending_strategy_count >= STRATEGY_CONFIRMATION_REQUIRED:
-            self._mark_strategy_applied(desired_result, now, pv_power)
-            return desired_result, True
-
-        return active_result, False
 
     # ------------------------------------------------------------------
     # Event listeners
@@ -614,7 +573,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             except (ValueError, TypeError):
                 return
             if self._last_optimize_soc is not None:
-                if abs(new_soc - self._last_optimize_soc) < SOC_TRIGGER_DELTA:
+                if abs(new_soc - self._last_optimize_soc) < self._policy.soc_trigger_delta:
                     return
 
         self.hass.async_create_task(self._trigger_optimize("event", notify=True))
@@ -667,7 +626,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             not force
             and
             self._last_optimize_dt is not None
-            and (now - self._last_optimize_dt) < OPTIMIZE_MIN_INTERVAL
+            and (now - self._last_optimize_dt) < self._policy.optimize_min_interval
         ):
             _LOGGER.debug("BatteryOptimizer: skipping (%s) — cooldown active", reason)
             return
@@ -895,18 +854,10 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
     def _trim_price_snapshot(self, snapshot: PriceData, now: datetime) -> PriceData | None:
         """Return a forward-looking price snapshot with past hours removed."""
-        raw_prices = snapshot.to_legacy_raw_prices()
-        current_hour = _normalize_local_datetime(now).replace(minute=0, second=0, microsecond=0)
-        points = [point for point in snapshot.points if point.end > current_hour]
-        current_price = get_current_price_from_raw(raw_prices, now, fallback=snapshot.current_price)
-
-        if current_price is None and not points:
-            return None
-
-        return PriceData(
-            points=points,
-            current_price=current_price,
-            source_entity=snapshot.source_entity,
+        return self._ensure_price_runtime().trim_snapshot(
+            snapshot,
+            now,
+            _normalize_local_datetime,
         )
 
     def _resolve_price_snapshot(
@@ -916,23 +867,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         fresh_snapshot: PriceData | None,
     ) -> PriceData | None:
         """Prefer fresh actual prices, otherwise fall back to the last valid snapshot."""
-        cache_attr = "_cached_sell_price_data" if cache_kind == "sell" else "_cached_buy_price_data"
-        if fresh_snapshot is not None:
-            trimmed_fresh = self._trim_price_snapshot(fresh_snapshot, now)
-            if trimmed_fresh is not None:
-                setattr(self, cache_attr, trimmed_fresh)
-                return trimmed_fresh
-
-        cached_snapshot = getattr(self, cache_attr)
-        if cached_snapshot is None:
-            return None
-
-        trimmed_cached = self._trim_price_snapshot(cached_snapshot, now)
-        if trimmed_cached is None:
-            return None
-
-        setattr(self, cache_attr, trimmed_cached)
-        return trimmed_cached
+        return self._ensure_price_runtime().resolve_snapshot(
+            now,
+            cache_kind,
+            fresh_snapshot,
+            _normalize_local_datetime,
+        )
 
     def _forecast_kwh_between(self, from_dt: datetime, to_dt: datetime) -> float:
         """Return forecast kWh in a time window from the current snapshot."""
@@ -950,6 +890,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         """Track actual PV generation and forecast quality over time."""
         if self._forecast_tracker is None:
             return
+        await self._ensure_tracker_runtime().update_forecast_tracker(
+            forecast_tracker=self._forecast_tracker,
+            now=now,
+            pv_power=pv_power,
+            forecast_total_today_kwh=forecast_total_today_kwh,
+        )
+        return
 
         if self._prev_update_time is None:
             dt_seconds = 0.0
@@ -983,6 +930,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         """Detect a clear mismatch between planned and actual battery behavior."""
         if self._optimizer is None:
             return False
+        return self._ensure_tracker_runtime().should_trigger_plan_deviation_replan(
+            optimizer=self._optimizer,
+            now=now,
+            battery_power=battery_power,
+            normalize_local_datetime=_normalize_local_datetime,
+        )
 
         plan = self._optimizer.get_last_plan()
         if not plan:
@@ -1111,47 +1064,24 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             _LOGGER.debug("Shadow log write failed: %s", exc)
 
     def _update_price_history(self, price: float) -> None:
-        self._price_history.append(price)
-        if len(self._price_history) > PRICE_HISTORY_MAX:
-            self._price_history.pop(0)
+        self._ensure_price_runtime().update_history(price)
 
     def _price_average(self) -> float | None:
-        if not self._price_history:
-            return None
-        return statistics.mean(self._price_history)
+        return self._ensure_price_runtime().price_average()
 
     def _battery_strategy(
         self, solar_surplus: float, price: float, avg_price: float | None
     ) -> str:
-        if solar_surplus > 0:
-            return "CHARGE_SOLAR"
-        if avg_price is not None:
-            if price > avg_price * PRICE_SURPLUS_FACTOR:
-                return "USE_BATTERY"
-            if price < avg_price * PRICE_CHEAP_FACTOR:
-                return "CHARGE_GRID"
-        return "IDLE"
+        return self._ensure_price_runtime().battery_strategy(solar_surplus, price, avg_price)
 
     def _record_night_price(self, hour: int, price: float) -> None:
-        if hour not in NIGHT_HOURS:
-            return
-        existing = self._night_prices.get(hour)
-        if existing is None or price < existing:
-            self._night_prices[hour] = price
+        self._ensure_price_runtime().record_night_price(hour, price)
 
     def _min_night_price(self) -> float | None:
-        if not self._night_prices:
-            return None
-        return min(self._night_prices.values())
+        return self._ensure_price_runtime().min_night_price()
 
     def _price_level(self, price: float, avg_price: float | None) -> str:
-        if avg_price is None:
-            return "NORMAL"
-        if price > avg_price * PRICE_SURPLUS_FACTOR:
-            return "EXPENSIVE"
-        if price < avg_price * PRICE_CHEAP_FACTOR:
-            return "CHEAP"
-        return "NORMAL"
+        return self._ensure_price_runtime().price_level(price, avg_price)
 
     def _load_sensor_is_total_load(self) -> bool:
         """Return True when the configured load sensor is a whole-site total load."""
@@ -1187,6 +1117,30 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             )
         return self._ev_runtime
 
+    def _ensure_price_runtime(self) -> PriceRuntime:
+        """Return price runtime helper, creating a fallback for tests that bypass __init__."""
+        if not hasattr(self, "_policy"):
+            self._policy = DEFAULT_COORDINATOR_POLICY
+        if not hasattr(self, "_price_runtime"):
+            self._price_runtime = PriceRuntime(self._policy)
+        return self._price_runtime
+
+    def _ensure_strategy_runtime(self) -> StrategyRuntime:
+        """Return strategy runtime helper, creating a fallback for tests that bypass __init__."""
+        if not hasattr(self, "_policy"):
+            self._policy = DEFAULT_COORDINATOR_POLICY
+        if not hasattr(self, "_strategy_runtime"):
+            self._strategy_runtime = StrategyRuntime(self._policy, config_entry=self._entry)
+        return self._strategy_runtime
+
+    def _ensure_tracker_runtime(self) -> TrackerRuntime:
+        """Return tracker runtime helper, creating a fallback for tests that bypass __init__."""
+        if not hasattr(self, "_policy"):
+            self._policy = DEFAULT_COORDINATOR_POLICY
+        if not hasattr(self, "_tracker_runtime"):
+            self._tracker_runtime = TrackerRuntime(self._policy, config_entry=self._entry)
+        return self._tracker_runtime
+
     def _ev_requires_battery_hold(self, ev_result: Any) -> bool:
         """Return True when EV charging should hold battery SOC via TOU."""
         if self.data is None or not ev_result.should_charge:
@@ -1195,8 +1149,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             return False
 
         surplus_w = max(0.0, float(ev_result.surplus_w))
-        needs_grid_support = float(ev_result.target_w) > surplus_w + _EV_GRID_PRIORITY_MARGIN_W
-        battery_to_ev = self.data.battery_power > self.data.load_power + _EV_BATTERY_PROTECTION_MARGIN_W
+        needs_grid_support = (
+            float(ev_result.target_w) > surplus_w + self._policy.ev_grid_priority_margin_w
+        )
+        battery_to_ev = (
+            self.data.battery_power > self.data.load_power + self._policy.ev_battery_protection_margin_w
+        )
         return needs_grid_support or battery_to_ev
 
     async def _update_tracker(
@@ -1211,6 +1169,17 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         """Feed BatteryTracker with this tick's charge/discharge delta."""
         if self._tracker is None:
             return
+        await self._ensure_tracker_runtime().update_battery_tracker(
+            tracker=self._tracker,
+            now=now,
+            pv_power=pv_power,
+            battery_power=battery_power,
+            load_power=load_power,
+            battery_soc=battery_soc,
+            current_price=current_price,
+            previous_soc=self.data.battery_soc if self.data is not None else None,
+        )
+        return
 
         # dt in hours since last tick
         if self._prev_update_time is None:
@@ -1599,6 +1568,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
     ) -> None:
         """Run EV optimizer and act on the result."""
         try:
+            ev_runtime = self._ensure_ev_runtime()
             if charger_status is None:
                 charger_status = await self._ev_charger.get_status()
             if charger_power is None:
@@ -1610,10 +1580,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 else self._vehicle.get_target_soc()
             )
 
-            ev_runtime = self._ensure_ev_runtime()
             ev_runtime.sync_startup(charger_status)
 
-            # Manuel EV-switch: hvis slukket → behandl som disconnected
             if not self.ev_charging_allowed:
                 charger_status = "disconnected"
                 _LOGGER.debug("EV: ladning deaktiveret af manuel switch")
@@ -1626,11 +1594,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
             _now = ha_dt.now()
             _departure = self.ev_next_departure
-
-            # Solar kWh expected from now until departure — reads both Solcast sensors
-            # because forecast_today only covers until midnight.
-            # Normalize every timestamp to local time before comparing, matching
-            # the same approach used in _compute_ev_plan.
             solar_to_departure = self._forecast_kwh_between(_now, _departure)
             _LOGGER.debug(
                 "EV solar forecast til afgang %s: %.2f kWh",
@@ -1641,7 +1604,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             if not self.ev_solar_only_grid_buffer_enabled:
                 solar_only_profile = replace(solar_only_profile, grid_buffer_w=0.0)
 
-            # Expected SOC at this moment from previous plan — used for behind-schedule check
             _now_hour = _now.replace(minute=0, second=0, microsecond=0)
             _expected_soc = self.data.ev_vehicle_soc or 0.0
             for _slot in self.data.ev_plan:
@@ -1704,7 +1666,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                     actual_charging=actual_charging,
                 )
 
-            # Opdater data FØRST — altid konsistente sensorer selv hvis service calls fejler
             self.data.ev_charging_enabled = True
             self.data.ev_charging_power = charger_power
             self.data.ev_vehicle_soc = vehicle_soc
@@ -1727,7 +1688,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             self.data.ev_charge_mode = self.ev_charge_mode
             self.data.ev_min_range_km = min_range_km
             self.data.ev_emergency_charging = ev_result.is_emergency
-            # Compute min SOC needed to cover min_range_km (for sensor display)
             if min_range_km > 0 and vehicle_efficiency > 0 and self.vehicle_battery_kwh > 0:
                 self.data.ev_min_soc_from_range = min(
                     100.0,
@@ -1762,11 +1722,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 now=now,
             )
             self._ev_currently_charging = ev_runtime.currently_charging
-
-            
-
-
-            # Compute EV plan after data is updated
             self.data.ev_plan = self._compute_ev_plan()
 
         except Exception as e:  # noqa: BLE001

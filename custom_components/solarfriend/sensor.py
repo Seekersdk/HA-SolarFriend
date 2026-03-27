@@ -19,7 +19,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import SolarFriendCoordinator, SolarFriendData, ev_device_info
+from .coordinator import SolarFriendCoordinator
+from .coordinator_models import SolarFriendData, ev_device_info
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -20,7 +20,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
-from .coordinator import SolarFriendCoordinator, ev_device_info
+from .coordinator import SolarFriendCoordinator
+from .coordinator_models import ev_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
