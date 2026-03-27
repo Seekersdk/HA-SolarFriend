@@ -11,7 +11,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED, DOMAIN
+from .const import (
+    CONF_BATTERY_SELL_ENABLED,
+    CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED,
+    DOMAIN,
+)
 from .coordinator import SolarFriendCoordinator
 from .coordinator_models import ev_device_info
 
@@ -25,7 +29,10 @@ async def async_setup_entry(
 ) -> None:
     coordinator: SolarFriendCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities: list[SwitchEntity] = [SolarFriendShadowLogSwitch(coordinator, entry)]
+    entities: list[SwitchEntity] = [
+        SolarFriendShadowLogSwitch(coordinator, entry),
+        SolarFriendBatterySellSwitch(coordinator, entry),
+    ]
     if entry.data.get("ev_charging_enabled", False):
         entities.append(SolarFriendEVSwitch(coordinator))
         entities.append(SolarFriendEVSolarOnlyGridBufferSwitch(coordinator, entry))
@@ -128,6 +135,60 @@ class SolarFriendShadowLogSwitch(RestoreEntity, SwitchEntity):
         await self._persist_state()
         self.async_write_ha_state()
         _LOGGER.info("Shadow log deaktiveret")
+
+
+class SolarFriendBatterySellSwitch(RestoreEntity, SwitchEntity):
+    """Persistent runtime override for battery-to-grid selling."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Allow Sell Battery"
+    _attr_icon = "mdi:cash-sync"
+
+    def __init__(self, coordinator: SolarFriendCoordinator, entry: ConfigEntry) -> None:
+        self._coordinator = coordinator
+        self._entry = entry
+        self._is_on = bool(entry.data.get(CONF_BATTERY_SELL_ENABLED, True))
+        self._attr_unique_id = f"{entry.entry_id}_battery_sell_enabled"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.data.get("name", "SolarFriend"),
+            manufacturer="SolarFriend",
+            model="Solar Energy Manager",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        return self._is_on
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state in ("on", "off"):
+            self._is_on = last_state.state == "on"
+        self._coordinator.battery_sell_enabled = self._is_on
+        new_data = {**self._entry.data, CONF_BATTERY_SELL_ENABLED: self._is_on}
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+
+    async def _persist_state(self, *, reason: str) -> None:
+        new_data = {**self._entry.data, CONF_BATTERY_SELL_ENABLED: self._is_on}
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        await self._coordinator.async_on_runtime_setting_changed(
+            reason=f"switch-{CONF_BATTERY_SELL_ENABLED}-{reason}"
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self._is_on = True
+        self._coordinator.battery_sell_enabled = True
+        await self._persist_state(reason="updated")
+        self.async_write_ha_state()
+        _LOGGER.info("Battery sell aktiveret")
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self._is_on = False
+        self._coordinator.battery_sell_enabled = False
+        await self._persist_state(reason="updated")
+        self.async_write_ha_state()
+        _LOGGER.info("Battery sell deaktiveret")
 
 
 class SolarFriendEVSolarOnlyGridBufferSwitch(RestoreEntity, SwitchEntity):

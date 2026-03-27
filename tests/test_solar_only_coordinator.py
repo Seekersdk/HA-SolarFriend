@@ -81,6 +81,7 @@ if "homeassistant" not in sys.modules:
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from custom_components.solarfriend.coordinator import SolarFriendCoordinator  # noqa: E402
+from custom_components.solarfriend.battery_optimizer import OptimizeResult  # noqa: E402
 from custom_components.solarfriend.ev_optimizer import EVContext, EVOptimizeResult, EVOptimizer  # noqa: E402
 from custom_components.solarfriend.weather_profile import CLOUDY_PROFILE, PARTLY_CLOUDY_PROFILE  # noqa: E402
 import custom_components.solarfriend.coordinator as coordinator_mod  # noqa: E402
@@ -97,6 +98,7 @@ def _make_coordinator() -> SolarFriendCoordinator:
     coordinator.hass = types.SimpleNamespace(
         services=types.SimpleNamespace(async_call=None),
     )
+    coordinator.battery_sell_enabled = True
     return coordinator
 
 
@@ -242,3 +244,31 @@ def test_fetch_weather_profile_uses_service_response_and_cache():
     assert profile == CLOUDY_PROFILE
     assert len(cached) == 2
     assert len(service_calls) == 1
+
+
+def test_battery_sell_override_demotes_sell_battery_to_use_battery():
+    coordinator = _make_coordinator()
+    coordinator.battery_sell_enabled = False
+
+    result = OptimizeResult(
+        strategy="SELL_BATTERY",
+        reason="Sælger batteri nu",
+        target_soc=None,
+        charge_now=False,
+        cheapest_charge_hour=None,
+        night_charge_kwh=0.0,
+        morning_need_kwh=0.0,
+        day_deficit_kwh=0.0,
+        peak_need_kwh=0.0,
+        expected_saving_dkk=2.5,
+        weighted_battery_cost=0.3,
+        solar_fraction=0.5,
+        best_discharge_hours=[],
+        solar_sell=True,
+    )
+
+    overridden = coordinator._apply_optimizer_runtime_overrides(result)
+
+    assert overridden.strategy == "USE_BATTERY"
+    assert "deaktiveret af bruger-override" in overridden.reason
+    assert overridden.solar_sell is True

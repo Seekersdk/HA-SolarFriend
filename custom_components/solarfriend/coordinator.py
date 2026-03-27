@@ -35,6 +35,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as ha_dt
 
 from .const import (
+    CONF_BATTERY_SELL_ENABLED,
     CONF_BUY_PRICE_SENSOR,
     CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED,
     CONF_SELL_PRICE_SENSOR,
@@ -327,6 +328,9 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self.ev_solar_only_grid_buffer_enabled: bool = bool(
             entry.data.get(CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED, True)
         )
+        self.battery_sell_enabled: bool = bool(
+            entry.data.get(CONF_BATTERY_SELL_ENABLED, True)
+        )
         self._ev_runtime: EVRuntimeController | None = None
         self.ev_charging_allowed: bool = True  # styres af SolarFriendEVSwitch
 
@@ -503,6 +507,30 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             pv_power=pv_power,
             sunset=sunset,
             solar_until_sunset_kwh=self.data.solar_until_sunset if self.data else 0.0,
+        )
+
+    def _apply_optimizer_runtime_overrides(
+        self,
+        result: OptimizeResult,
+    ) -> OptimizeResult:
+        """
+        Apply user-facing runtime overrides before strategy hysteresis/execution.
+
+        Keep these overrides here instead of in the optimizer so the optimizer
+        stays a pure economic planner and runtime toggles remain coordinator policy.
+        """
+        if self.battery_sell_enabled:
+            return result
+        if result.strategy != "SELL_BATTERY":
+            return result
+        return replace(
+            result,
+            strategy="USE_BATTERY",
+            reason=(
+                "Battery sell er deaktiveret af bruger-override. "
+                f"{result.reason}"
+            ),
+            solar_sell=True,
         )
 
     # ------------------------------------------------------------------
@@ -778,6 +806,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             and self.ev_charge_mode == "solar_only"
             and self._has_current_ev_solar_slot(reserved_ev_solar_kwh, now)
         )
+
+        result = self._apply_optimizer_runtime_overrides(result)
 
         selected_result, strategy_changed = self._select_strategy_result(
             result,

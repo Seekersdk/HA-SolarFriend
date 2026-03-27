@@ -7,6 +7,7 @@ CONF_BUY_PRICE_SENSOR = "buy_price_sensor"
 CONF_SELL_PRICE_SENSOR = "sell_price_sensor"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_EV_SOLAR_ONLY_GRID_BUFFER_ENABLED = "ev_solar_only_grid_buffer_enabled"
+CONF_BATTERY_SELL_ENABLED = "battery_sell_enabled"
 
 CONF_MQTT_TOPIC_PREFIX = "topic_prefix"
 DEFAULT_MQTT_TOPIC_PREFIX = "deye/sensor"
