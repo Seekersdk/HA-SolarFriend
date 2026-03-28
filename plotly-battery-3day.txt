@@ -1,0 +1,421 @@
+type: custom:plotly-graph
+hours_to_show: 72h
+time_offset: 0h
+refresh_interval: 30
+ha_theme: true
+autorange_after_scroll: true
+
+defaults:
+  entity:
+    mode: lines
+    hovertemplate: |
+      $fn ({ getFromConfig }) =>
+      `<b>${getFromConfig(".name")}</b><br>` +
+      `%{x|%d/%m %H:%M}<br>` +
+      `%{y:.0f} ${getFromConfig(".unit_of_measurement") || ""}` +
+      `<extra></extra>`
+    line:
+      shape: spline
+      smoothing: 0.65
+  xaxes:
+    showspikes: true
+    spikemode: across
+    spikethickness: 2
+    showgrid: false
+  yaxes:
+    fixedrange: false
+
+layout:
+  height: 620
+  hovermode: x unified
+  plot_bgcolor: "rgba(0,0,0,0)"
+  paper_bgcolor: "rgba(0,0,0,0)"
+  margin:
+    l: 56
+    r: 64
+    t: 20
+    b: 44
+  legend:
+    orientation: h
+    yanchor: bottom
+    y: 1.02
+    xanchor: left
+    x: 0
+  xaxis:
+    title:
+      text: Tid
+    tickformat: "%d/%m %H:%M"
+    rangeselector:
+      y: 1.15
+      buttons:
+        - count: 1
+          step: day
+          stepmode: backward
+          label: I går
+        - count: 0
+          step: day
+          stepmode: todate
+          label: I dag
+        - count: 1
+          step: day
+          stepmode: forward
+          label: I morgen
+        - count: 3
+          step: day
+          stepmode: backward
+          label: 3 dage
+  yaxis:
+    title:
+      text: Effekt (W)
+    range:
+      - 0
+      - 8500
+  yaxis2:
+    title:
+      text: SOC (%)
+    overlaying: y
+    side: right
+    range:
+      - 0
+      - 100
+    fixedrange: true
+    autorange: false
+    rangemode: nonnegative
+    showgrid: false
+    zeroline: false
+config:
+  displayModeBar: true
+  scrollZoom: true
+
+entities:
+  - entity: sensor.solarfriend_battery_plan
+    name: Slot batteri sol
+    unit_of_measurement: slot
+    yaxis: y2
+    mode: lines
+    opacity: 0.45
+    line:
+      color: "#8B5CF6"
+      width: 8
+      shape: hv
+    hovertemplate: |
+      <b>Slot: Batteri fra sol</b><br>%{x|%d/%m %H:%M}<extra></extra>
+    x: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const start = new Date(h.hour);
+        const end = new Date(start.getTime() + 3600000);
+        return [start, end];
+      })
+    y: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const active = (+h.solar_charge_w || 0) > 0 ? 97 : null;
+        return [active, active];
+      })
+
+  - entity: sensor.solarfriend_battery_plan
+    name: Slot batteri net
+    unit_of_measurement: slot
+    yaxis: y2
+    mode: lines
+    opacity: 0.45
+    line:
+      color: "#EC4899"
+      width: 8
+      shape: hv
+    hovertemplate: |
+      <b>Slot: Batteri fra net</b><br>%{x|%d/%m %H:%M}<extra></extra>
+    x: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const start = new Date(h.hour);
+        const end = new Date(start.getTime() + 3600000);
+        return [start, end];
+      })
+    y: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const active = (+h.grid_charge_w || 0) > 0 ? 97 : null;
+        return [active, active];
+      })
+
+  - entity: sensor.solarfriend_battery_plan
+    name: Slot batteri afladning
+    unit_of_measurement: slot
+    yaxis: y2
+    mode: lines
+    opacity: 0.5
+    line:
+      color: "#F97316"
+      width: 8
+      shape: hv
+    hovertemplate: |
+      <b>Slot: Batteri afladning</b><br>%{x|%d/%m %H:%M}<extra></extra>
+    x: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const start = new Date(h.hour);
+        const end = new Date(start.getTime() + 3600000);
+        return [start, end];
+      })
+    y: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const active = (+h.discharge_w || 0) > 0 ? 97 : null;
+        return [active, active];
+      })
+
+  - entity: sensor.solarfriend_ev_ev_plan
+    name: Slot EV sol
+    unit_of_measurement: slot
+    yaxis: y2
+    mode: lines
+    opacity: 0.45
+    line:
+      color: "#22C55E"
+      width: 8
+      shape: hv
+    hovertemplate: |
+      <b>Slot: EV sol</b><br>%{x|%d/%m %H:%M}<extra></extra>
+    x: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const start = new Date(h.hour);
+        const end = new Date(start.getTime() + 3600000);
+        return [start, end];
+      })
+    y: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const active = (+h.solar_w || 0) > 0 ? 97 : null;
+        return [active, active];
+      })
+
+  - entity: sensor.solarfriend_ev_ev_plan
+    name: Slot EV net
+    unit_of_measurement: slot
+    yaxis: y2
+    mode: lines
+    opacity: 0.5
+    line:
+      color: "#06B6D4"
+      width: 8
+      shape: hv
+    hovertemplate: |
+      <b>Slot: EV net</b><br>%{x|%d/%m %H:%M}<extra></extra>
+    x: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const start = new Date(h.hour);
+        const end = new Date(start.getTime() + 3600000);
+        return [start, end];
+      })
+    y: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const active = (+h.grid_w || 0) > 0 ? 97 : null;
+        return [active, active];
+      })
+
+  - entity: sensor.solcast_pv_forecast_forecast_today
+    name: Forventet sol
+    unit_of_measurement: W
+    yaxis: y1
+    fill: tozeroy
+    opacity: 0.18
+    line:
+      color: "#FFD700"
+      width: 1.4
+      shape: spline
+      smoothing: 0.75
+    x: |
+      $ex {
+        const today = meta.detailedHourly || [];
+        const tomorrow =
+          hass?.states?.["sensor.solcast_pv_forecast_forecast_tomorrow"]?.attributes?.detailedHourly || [];
+        return [...today, ...tomorrow].map(f => new Date(f.period_start));
+      }
+    y: |
+      $ex {
+        const today = meta.detailedHourly || [];
+        const tomorrow =
+          hass?.states?.["sensor.solcast_pv_forecast_forecast_tomorrow"]?.attributes?.detailedHourly || [];
+        return [...today, ...tomorrow].map(f => Math.round((f.pv_estimate || 0) * 1000));
+      }
+
+  - entity: sensor.solarfriend_consumption_profile_chart
+    name: Forventet forbrug
+    unit_of_measurement: W
+    yaxis: y1
+    fill: tozeroy
+    opacity: 0.12
+    line:
+      color: "#FF6B6B"
+      width: 1.4
+      shape: spline
+      smoothing: 0.75
+    x: |
+      $ex {
+        const start = new Date();
+        start.setHours(0,0,0,0);
+        start.setDate(start.getDate() - 1);
+        return Array.from({length: 72}, (_, i) => new Date(start.getTime() + i * 3600000));
+      }
+    y: |
+      $ex {
+        const profile = meta.hourly_profile || [];
+        return Array.from({length: 72}, (_, i) => +profile[i % 24] || 0);
+      }
+
+  - entity: sensor.solarfriend_battery_plan
+    name: Batteri fra sol
+    unit_of_measurement: W
+    yaxis: y1
+    fill: tozeroy
+    opacity: 0.14
+    line:
+      color: "#4FC3F7"
+      width: 1.4
+      shape: spline
+      smoothing: 0.7
+    x: |
+      $ex (meta.hourly_plan || []).map(h => new Date(h.hour))
+    y: |
+      $ex (meta.hourly_plan || []).map(h => +h.solar_charge_w || 0)
+
+  - entity: sensor.solarfriend_battery_plan
+    name: Batteri fra net
+    unit_of_measurement: W
+    yaxis: y1
+    fill: tozeroy
+    opacity: 0.10
+    line:
+      color: "#008FFB"
+      width: 1.4
+      shape: spline
+      smoothing: 0.7
+    x: |
+      $ex (meta.hourly_plan || []).map(h => new Date(h.hour))
+    y: |
+      $ex (meta.hourly_plan || []).map(h => +h.grid_charge_w || 0)
+
+  - entity: sensor.solarfriend_battery_plan
+    name: Batteri afladning
+    unit_of_measurement: W
+    yaxis: y1
+    fill: tozeroy
+    opacity: 0.10
+    line:
+      color: "#0288D1"
+      width: 1.4
+      shape: spline
+      smoothing: 0.7
+    x: |
+      $ex (meta.hourly_plan || []).map(h => new Date(h.hour))
+    y: |
+      $ex (meta.hourly_plan || []).map(h => +h.discharge_w || 0)
+
+  - entity: sensor.solarfriend_battery_plan
+    name: Netimport
+    unit_of_measurement: W
+    yaxis: y1
+    line:
+      color: "#775DD0"
+      width: 2
+      dash: dot
+      shape: spline
+      smoothing: 0.6
+    x: |
+      $ex (meta.hourly_plan || []).map(h => new Date(h.hour))
+    y: |
+      $ex (meta.hourly_plan || []).map(h => +h.grid_import_w || 0)
+
+  - entity: sensor.solarfriend_pv_power
+    name: Faktisk sol
+    unit_of_measurement: W
+    yaxis: y1
+    statistic: mean
+    period: 5minute
+    line:
+      color: "#FFA500"
+      width: 2.4
+      shape: spline
+      smoothing: 0.45
+
+  - entity: sensor.solarfriend_load_power
+    name: Faktisk forbrug
+    unit_of_measurement: W
+    yaxis: y1
+    statistic: mean
+    period: 5minute
+    line:
+      color: "#FF4444"
+      width: 2.4
+      shape: spline
+      smoothing: 0.45
+
+  - entity: sensor.solarfriend_battery_power
+    name: Faktisk batteri ladning
+    unit_of_measurement: W
+    yaxis: y1
+    statistic: mean
+    period: 5minute
+    line:
+      color: "#29B6F6"
+      width: 2.2
+      shape: spline
+      smoothing: 0.45
+    filters:
+      - force_numeric
+      - map_y_numbers: "y < 0 ? Math.abs(y) : 0"
+
+  - entity: sensor.solarfriend_battery_power
+    name: Faktisk batteri afladning
+    unit_of_measurement: W
+    yaxis: y1
+    statistic: mean
+    period: 5minute
+    line:
+      color: "#0277BD"
+      width: 2.2
+      shape: spline
+      smoothing: 0.45
+    filters:
+      - force_numeric
+      - map_y_numbers: "y > 0 ? y : 0"
+
+  - entity: sensor.solarfriend_battery_soc
+    name: SOC (faktisk)
+    unit_of_measurement: "%"
+    yaxis: y2
+    statistic: mean
+    period: 5minute
+    line:
+      color: "#00C853"
+      width: 2.4
+      shape: spline
+      smoothing: 0.4
+    hovertemplate: |
+      <b>SOC (faktisk)</b><br>%{x|%d/%m %H:%M}<br>%{y:.0f}%<extra></extra>
+
+  - entity: sensor.solarfriend_battery_plan
+    name: SOC (forventet)
+    unit_of_measurement: "%"
+    yaxis: y2
+    line:
+      color: "#69F0AE"
+      width: 1.8
+      dash: dash
+      shape: spline
+      smoothing: 0.5
+    hovertemplate: |
+      <b>SOC (forventet)</b><br>%{x|%d/%m %H:%M}<br>%{y:.0f}%<extra></extra>
+    x: |
+      $ex (meta.hourly_plan || []).map(h => new Date(h.hour))
+    y: |
+      $ex (meta.hourly_plan || []).map(h => +h.soc || 0)
+
+  - entity: ""
+    name: Nu
+    yaxis: y1
+    showlegend: false
+    line:
+      color: "#FFFFFF"
+      width: 1
+      dash: dot
+    x: |
+      $ex [Date.now(), Date.now()]
+    y:
+      - 0
+      - 8500

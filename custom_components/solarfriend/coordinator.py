@@ -44,7 +44,11 @@ from .const import (
 from .advanced_consumption_model import AdvancedConsumptionModel
 from .consumption_profile import ConsumptionProfile
 from .battery_tracker import BatteryTracker
-from .battery_optimizer import BatteryOptimizer, OptimizeResult
+from .battery_optimizer import (
+    ALLOWED_DISCHARGE_SOLAR_THRESHOLD_W,
+    BatteryOptimizer,
+    OptimizeResult,
+)
 from .forecast_adapter import ForecastAdapter, get_forecast_for_period
 from .forecast_correction_model import ForecastCorrectionModel
 from .forecast_tracker import ForecastTracker
@@ -396,6 +400,59 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             solar_until_sunset_kwh=self.data.solar_until_sunset if self.data else 0.0,
         )
 
+    def _apply_allowed_discharge_slot_override(
+        self,
+        result: OptimizeResult,
+        *,
+        allowed_slots_source: OptimizeResult | None = None,
+        now: datetime,
+        pv_power: float,
+        load_power: float,
+        current_soc: float,
+    ) -> OptimizeResult:
+        """Open the battery in economically approved fallback slots when live deficit appears."""
+        if result.strategy not in {"IDLE", "SAVE_SOLAR"}:
+            return result
+
+        source_result = allowed_slots_source or result
+        allowed_slots = getattr(source_result, "allowed_discharge_slots", None) or []
+        if not allowed_slots:
+            return result
+
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
+        active_slot = next(
+            (
+                slot
+                for slot in allowed_slots
+                if _normalize_local_datetime(_parse_dt(slot["hour"])).replace(
+                    minute=0, second=0, microsecond=0
+                )
+                == current_hour
+            ),
+            None,
+        )
+        if active_slot is None:
+            return result
+
+        live_deficit_w = max(0.0, load_power - pv_power)
+        if live_deficit_w <= self._policy.battery_noise_w:
+            return result
+
+        min_soc = float(self._entry.data.get("battery_min_soc", 10.0))
+        if current_soc <= (min_soc + self._policy.soc_override_margin):
+            return result
+
+        return replace(
+            result,
+            strategy="USE_BATTERY",
+            reason=(
+                f"Allowed batteri-slot {active_slot['hour_str']} aktiv: "
+                f"forecast {float(active_slot['forecast_solar_w']):.0f}W under "
+                f"{ALLOWED_DISCHARGE_SOLAR_THRESHOLD_W:.0f}W og live underskud "
+                f"{live_deficit_w:.0f}W"
+            ),
+        )
+
     # ------------------------------------------------------------------
     # Event listeners
     # ------------------------------------------------------------------
@@ -437,6 +494,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         """Called when a watched entity changes."""
         entity_id: str = event.data.get("entity_id", "")
         soc_sensor = self._entry.data.get("battery_soc_sensor", "")
+        price_sensors = {
+            self._entry.data.get(CONF_BUY_PRICE_SENSOR, ""),
+            self._entry.data.get(CONF_SELL_PRICE_SENSOR, ""),
+            self._entry.data.get("price_sensor", ""),
+        }
+        price_sensors.discard("")
 
         if entity_id == "sensor.solcast_pv_forecast_forecast_today":
             used, limit = 0, 0
@@ -453,6 +516,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 used, limit,
             )
             self.hass.async_create_task(self._trigger_optimize(reason="solcast_updated"))
+            return
+
+        if entity_id in price_sensors:
+            _LOGGER.info("Pris opdateret på %s - tvinger straks ny optimizer-plan", entity_id)
+            self.hass.async_create_task(
+                self._trigger_optimize("price_updated", notify=True, force=True)
+            )
             return
 
         if entity_id == soc_sensor:
@@ -703,6 +773,17 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             pv_power=pv_power,
             sunset=sunset,
         )
+        allowed_slot_result = self._apply_allowed_discharge_slot_override(
+            selected_result,
+            allowed_slots_source=result,
+            now=now,
+            pv_power=pv_power,
+            load_power=load_power,
+            current_soc=current_soc,
+        )
+        if allowed_slot_result.strategy != selected_result.strategy:
+            selected_result = allowed_slot_result
+            strategy_changed = True
 
         if (
             self._ev_active_solar_slot

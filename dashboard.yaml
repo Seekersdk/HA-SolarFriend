@@ -105,10 +105,12 @@ views:
             type: area
             yaxis_id: power
             data_generator: |
-              const forecast = entity.attributes.detailedHourly || [];
-              return forecast.map(f => [
+              const today = entity.attributes.detailedHourly || [];
+              const tomorrow =
+                hass.states['sensor.solcast_pv_forecast_forecast_tomorrow']?.attributes?.detailedHourly || [];
+              return [...today, ...tomorrow].map(f => [
                 new Date(f.period_start).getTime(),
-                Math.round(f.pv_estimate * 1000)
+                Math.round((f.pv_estimate || 0) * 1000)
               ]);
           - entity: sensor.solarfriend_consumption_profile_chart
             name: Forventet forbrug

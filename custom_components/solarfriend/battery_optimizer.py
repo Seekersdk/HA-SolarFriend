@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional, List
 
@@ -12,6 +12,7 @@ from .price_adapter import get_current_price_from_raw
 
 _LOGGER = logging.getLogger(__name__)
 LOW_GRID_HOLD_PRICE = 0.10  # kr/kWh: prefer grid over battery wear near zero-price periods
+ALLOWED_DISCHARGE_SOLAR_THRESHOLD_W = 2000.0
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +36,7 @@ class OptimizeResult:
     weighted_battery_cost: float           # Aktuel vægtet batteriomkostning (kr/kWh)
     solar_fraction: float                  # Andel sol i batteriet (0.0–1.0)
     best_discharge_hours: List[str]        # "HH:MM" — timer med højest discharge-value
+    allowed_discharge_slots: List[dict[str, Any]] = field(default_factory=list)
     solar_sell: bool = True               # False → slå solar-salg til net fra (negativ pris)
 
     @classmethod
@@ -59,6 +61,7 @@ class OptimizeResult:
             weighted_battery_cost=weighted_cost,
             solar_fraction=solar_fraction,
             best_discharge_hours=[],
+            allowed_discharge_slots=[],
             solar_sell=True,
         )
 
@@ -363,6 +366,60 @@ class BatteryOptimizer:
 
         return plan
 
+    def _build_allowed_discharge_slots(
+        self,
+        *,
+        now: datetime,
+        current_soc: float,
+        raw_prices: list[dict[str, Any]],
+        weighted_cost: float,
+        hourly_forecast: list | None,
+        raw_sell_prices: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return fallback slots where battery discharge is allowed if solar underdelivers."""
+        if not raw_prices:
+            return []
+
+        no_solar_plan = self._build_horizon_plan(
+            now=now,
+            current_soc=current_soc,
+            raw_prices=raw_prices,
+            weighted_cost=weighted_cost,
+            hourly_forecast=None,
+            reserved_solar_kwh=None,
+            raw_sell_prices=raw_sell_prices,
+        )
+        forecast_by_hour = self._build_forecast_map(hourly_forecast, now)
+        allowed_slots: list[dict[str, Any]] = []
+
+        for slot in no_solar_plan:
+            slot_start = datetime.fromisoformat(slot["hour"])
+            forecast_solar_w = round(forecast_by_hour.get(slot_start, 0.0) * 1000)
+            if forecast_solar_w >= ALLOWED_DISCHARGE_SOLAR_THRESHOLD_W:
+                continue
+
+            baseline_discharge_w = round(
+                float(slot.get("discharge_to_load_w", slot["discharge_w"]))
+            )
+            if baseline_discharge_w <= 0:
+                continue
+
+            allowed_slots.append(
+                {
+                    "hour": slot["hour"],
+                    "hour_str": slot["hour_str"],
+                    "forecast_solar_w": forecast_solar_w,
+                    "baseline_discharge_w": baseline_discharge_w,
+                    "price_dkk": round(float(slot["price_dkk"]), 4),
+                    "value_dkk_per_kwh": round(
+                        max(0.0, float(slot["price_dkk"]) - weighted_cost),
+                        4,
+                    ),
+                }
+            )
+
+        return allowed_slots
+
     def get_last_plan(self) -> list[dict[str, Any]]:
         """Return the latest optimizer horizon plan."""
         return list(self._last_plan)
@@ -435,6 +492,7 @@ class BatteryOptimizer:
                 weighted_battery_cost=weighted_cost,
                 solar_fraction=solar_fraction,
                 best_discharge_hours=[],
+                allowed_discharge_slots=[],
                 solar_sell=False,
             )
 
@@ -462,6 +520,7 @@ class BatteryOptimizer:
                 weighted_battery_cost=weighted_cost,
                 solar_fraction=solar_fraction,
                 best_discharge_hours=[],
+                allowed_discharge_slots=[],
                 solar_sell=False,
             )
 
@@ -536,6 +595,14 @@ class BatteryOptimizer:
             ),
             4,
         )
+        allowed_discharge_slots = self._build_allowed_discharge_slots(
+            now=now,
+            current_soc=current_soc,
+            raw_prices=raw_prices,
+            weighted_cost=weighted_cost,
+            hourly_forecast=hourly_forecast,
+            raw_sell_prices=sell_prices,
+        )
 
         # Keep the real-time solar heuristics that users already rely on.
         solar_remaining = forecast_today_kwh
@@ -560,6 +627,7 @@ class BatteryOptimizer:
                 weighted_battery_cost=weighted_cost,
                 solar_fraction=solar_fraction,
                 best_discharge_hours=best_discharge_hours,
+                allowed_discharge_slots=allowed_discharge_slots,
             )
         if hourly_forecast and solar_next_2h > 1.0 and battery_has_headroom:
             return OptimizeResult(
@@ -576,6 +644,7 @@ class BatteryOptimizer:
                 weighted_battery_cost=weighted_cost,
                 solar_fraction=solar_fraction,
                 best_discharge_hours=best_discharge_hours,
+                allowed_discharge_slots=allowed_discharge_slots,
             )
 
         cheapest_charge_hour = next(
@@ -626,6 +695,7 @@ class BatteryOptimizer:
                 weighted_battery_cost=weighted_cost,
                 solar_fraction=solar_fraction,
                 best_discharge_hours=best_discharge_hours,
+                allowed_discharge_slots=allowed_discharge_slots,
             )
 
         if total_planned_charge_kwh > 0 and (
@@ -649,6 +719,7 @@ class BatteryOptimizer:
                 weighted_battery_cost=weighted_cost,
                 solar_fraction=solar_fraction,
                 best_discharge_hours=best_discharge_hours,
+                allowed_discharge_slots=allowed_discharge_slots,
             )
 
         if (
@@ -673,6 +744,7 @@ class BatteryOptimizer:
                 weighted_battery_cost=weighted_cost,
                 solar_fraction=solar_fraction,
                 best_discharge_hours=best_discharge_hours,
+                allowed_discharge_slots=allowed_discharge_slots,
             )
 
         if current_slot and current_slot["grid_charge_w"] > 0:
@@ -695,6 +767,7 @@ class BatteryOptimizer:
                 weighted_battery_cost=weighted_cost,
                 solar_fraction=solar_fraction,
                 best_discharge_hours=best_discharge_hours,
+                allowed_discharge_slots=allowed_discharge_slots,
             )
 
         future_discharge_exists = any(slot["discharge_w"] > 0 for slot in self._last_plan[1:])

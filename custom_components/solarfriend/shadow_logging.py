@@ -198,6 +198,9 @@ class ShadowLogger:
                 "peak_need_kwh": optimize_result.peak_need_kwh if optimize_result else None,
                 "expected_saving_dkk": optimize_result.expected_saving_dkk if optimize_result else None,
                 "best_discharge_hours": optimize_result.best_discharge_hours if optimize_result else [],
+                "allowed_discharge_slots": (
+                    optimize_result.allowed_discharge_slots if optimize_result else []
+                ),
                 "battery_plan": self.json_safe(data.battery_plan),
                 "forecast_soc_chart": self.json_safe(data.forecast_soc_chart),
             },

@@ -1,0 +1,698 @@
+class SolarFriendCommandCenter extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._hass = null;
+    this._config = { title: "SolarFriend Command Center" };
+    this._booted = false;
+  }
+
+  setConfig(config) {
+    this._config = { ...this._config, ...(config || {}) };
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  getCardSize() {
+    return 12;
+  }
+
+  _state(entityId) {
+    return this._hass?.states?.[entityId];
+  }
+
+  _num(entityId, fallback = 0) {
+    const raw = this._state(entityId)?.state;
+    const num = Number(raw);
+    return Number.isFinite(num) ? num : fallback;
+  }
+
+  _str(entityId, fallback = "N/A") {
+    const raw = this._state(entityId)?.state;
+    return raw === undefined || raw === null || raw === "unknown" || raw === "unavailable"
+      ? fallback
+      : String(raw);
+  }
+
+  _attr(entityId, key, fallback = null) {
+    const attrs = this._state(entityId)?.attributes || {};
+    return attrs[key] ?? fallback;
+  }
+
+  _fmtW(value) {
+    return `${Math.round(value || 0).toLocaleString("da-DK")} W`;
+  }
+
+  _fmtKW(value) {
+    return `${(Number(value || 0) / 1000).toFixed(1).replace(".", ",")} kW`;
+  }
+
+  _fmtPct(value) {
+    return `${Number(value || 0).toFixed(0)}%`;
+  }
+
+  _fmtKwh(value) {
+    return `${Number(value || 0).toFixed(1).replace(".", ",")} kWh`;
+  }
+
+  _fmtPrice(value) {
+    return `${Number(value || 0).toFixed(3).replace(".", ",")} kr/kWh`;
+  }
+
+  _safeArray(value) {
+    return Array.isArray(value) ? value : [];
+  }
+
+  _max(arr, fallback = 1) {
+    if (!arr.length) return fallback;
+    const max = Math.max(...arr);
+    return max > 0 ? max : fallback;
+  }
+
+  _spark(points, color, fill) {
+    if (!points.length) {
+      return `<div class="empty">Ingen data</div>`;
+    }
+    const width = 100;
+    const height = 40;
+    const max = this._max(points, 1);
+    const min = Math.min(...points, 0);
+    const span = Math.max(max - min, 1);
+    const coords = points
+      .map((p, i) => {
+        const x = (i / Math.max(points.length - 1, 1)) * width;
+        const y = height - ((p - min) / span) * height;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+    const area = `0,${height} ${coords} ${width},${height}`;
+    return `
+      <svg viewBox="0 0 ${width} ${height}" class="spark" preserveAspectRatio="none">
+        <polygon points="${area}" fill="${fill}"></polygon>
+        <polyline points="${coords}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></polyline>
+      </svg>
+    `;
+  }
+
+  _bars(data, fields, colors, formatter) {
+    if (!data.length) {
+      return `<div class="empty large">Ingen plandata</div>`;
+    }
+    const max = this._max(
+      data.flatMap((item) => fields.map((field) => Number(item[field] || 0))),
+      100
+    );
+    const rows = data.slice(0, 12).map((item) => {
+      const label = item.hour_str || this._hourLabel(item.hour);
+      const bars = fields
+        .map((field, idx) => {
+          const value = Number(item[field] || 0);
+          const width = Math.max((value / max) * 100, value > 0 ? 2 : 0);
+          return `
+            <div class="bar-track">
+              <div class="bar-fill" style="width:${width}%;background:${colors[idx]}"></div>
+            </div>
+            <div class="bar-value">${formatter(value)}</div>
+          `;
+        })
+        .join("");
+      return `<div class="bar-row"><div class="bar-label">${label}</div>${bars}</div>`;
+    });
+    return `<div class="bars">${rows.join("")}</div>`;
+  }
+
+  _hourLabel(hour) {
+    if (!hour) return "--";
+    const dt = new Date(hour);
+    if (Number.isNaN(dt.getTime())) return "--";
+    return `${String(dt.getHours()).padStart(2, "0")}:00`;
+  }
+
+  _flowLine(fromX, fromY, toX, toY, color, active) {
+    const opacity = active ? 1 : 0.18;
+    return `
+      <line x1="${fromX}" y1="${fromY}" x2="${toX}" y2="${toY}" stroke="${color}" stroke-width="8" stroke-linecap="round" opacity="${opacity}"></line>
+      <line x1="${fromX}" y1="${fromY}" x2="${toX}" y2="${toY}" stroke="#ffffff" stroke-width="1.4" stroke-dasharray="8 10" stroke-linecap="round" opacity="${active ? 0.75 : 0.12}">
+        <animate attributeName="stroke-dashoffset" from="36" to="0" dur="1.4s" repeatCount="indefinite"></animate>
+      </line>
+    `;
+  }
+
+  _flowNode(x, y, title, value, accent) {
+    return `
+      <g transform="translate(${x} ${y})">
+        <circle r="47" fill="rgba(7,15,24,0.95)" stroke="${accent}" stroke-width="2.5"></circle>
+        <circle r="34" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.07)" stroke-width="1"></circle>
+        <text y="-6" text-anchor="middle" fill="#95aab4" font-size="11" font-weight="700" letter-spacing="1.6">${title}</text>
+        <text y="16" text-anchor="middle" fill="#f4fbff" font-size="14" font-weight="800">${value}</text>
+      </g>
+    `;
+  }
+
+  _metric(label, value, hint, tone = "blue", spark = "") {
+    return `
+      <div class="metric ${tone}">
+        <div class="metric-top">
+          <div class="metric-label">${label}</div>
+          ${spark}
+        </div>
+        <div class="metric-value">${value}</div>
+        <div class="metric-hint">${hint}</div>
+      </div>
+    `;
+  }
+
+  _toggle(label, entityId) {
+    const state = this._str(entityId, "off");
+    return `
+      <div class="toggle-card">
+        <div class="toggle-label">${label}</div>
+        <div class="toggle-state ${state === "on" ? "on" : "off"}">${state}</div>
+        <div class="toggle-entity">${entityId}</div>
+      </div>
+    `;
+  }
+
+  _render() {
+    if (!this._hass) return;
+
+    const ENTITY = {
+      pvPower: "sensor.solarfriend_pv_power",
+      loadPower: "sensor.solarfriend_load_power",
+      gridPower: "sensor.solarfriend_grid_power",
+      batterySoc: "sensor.solarfriend_battery_soc",
+      batteryPower: "sensor.solarfriend_battery_power",
+      currentPrice: "sensor.solarfriend_current_price",
+      forecastToday: "sensor.solarfriend_forecast_today",
+      forecastRemaining: "sensor.solarfriend_forecast_remaining_today",
+      forecastPowerNow: "sensor.solarfriend_forecast_power_now",
+      forecastConfidence: "sensor.solarfriend_forecast_confidence",
+      optimizerStrategy: "sensor.solarfriend_optimizer_strategy",
+      optimizerSaving: "sensor.solarfriend_optimizer_expected_saving",
+      batteryPlan: "sensor.solarfriend_battery_plan",
+      consumptionProfile: "sensor.solarfriend_consumption_profile_chart",
+      evPower: "sensor.solarfriend_ev_ladning",
+      evSoc: "sensor.solarfriend_ev_bil_soc",
+      evSurplus: "sensor.solarfriend_ev_sol_overskud",
+      evStrategy: "sensor.solarfriend_ev_strategi",
+      evTargetSoc: "sensor.solarfriend_ev_target_soc",
+      evTargetPower: "sensor.solarfriend_ev_target_effekt",
+      evPhases: "sensor.solarfriend_ev_antal_faser",
+      evChargeMode: "sensor.solarfriend_ev_lademodus",
+      evEmergency: "sensor.solarfriend_ev_nodopladning_aktiv",
+      evChargerStatus: "sensor.solarfriend_ev_lader_status",
+      evHoursToDeparture: "sensor.solarfriend_ev_timer_til_afgang",
+      evMissingKwh: "sensor.solarfriend_ev_manglende_kwh",
+      evPlan: "sensor.solarfriend_ev_ev_plan",
+      shadowLog: "switch.solarfriend_shadow_log",
+      evChargingAllowed: "switch.solarfriend_ev_ev_ladning",
+      solarOnlyGridBuffer: "switch.solarfriend_ev_ev_solar_only_grid_buffer",
+      deyeSolarSell: "switch.klatremishw_deye_solar_sell",
+      defaultBatteryDischargeCurrent: "number.solarfriend_default_battery_discharge_current",
+      deyeMaxBatteryDischargeCurrent: "number.klatremishw_deye_maximum_battery_discharge_current",
+    };
+
+    const pv = this._num(ENTITY.pvPower);
+    const load = this._num(ENTITY.loadPower);
+    const grid = this._num(ENTITY.gridPower);
+    const batterySoc = this._num(ENTITY.batterySoc);
+    const batteryPower = this._num(ENTITY.batteryPower);
+    const price = this._num(ENTITY.currentPrice);
+    const forecastRemaining = this._num(ENTITY.forecastRemaining);
+    const forecastToday = this._num(ENTITY.forecastToday);
+    const forecastNow = this._num(ENTITY.forecastPowerNow);
+    const confidence = this._num(ENTITY.forecastConfidence);
+    const evPower = this._num(ENTITY.evPower);
+    const evSoc = this._num(ENTITY.evSoc);
+    const evSurplus = this._num(ENTITY.evSurplus);
+    const evTargetPower = this._num(ENTITY.evTargetPower);
+    const evTargetSoc = this._num(ENTITY.evTargetSoc);
+    const evHours = this._num(ENTITY.evHoursToDeparture);
+    const evMissing = this._num(ENTITY.evMissingKwh);
+
+    const batteryPlan = this._safeArray(this._attr(ENTITY.batteryPlan, "hourly_plan", []));
+    const evPlan = this._safeArray(this._attr(ENTITY.evPlan, "hourly_plan", []));
+    const consumption = this._safeArray(this._attr(ENTITY.consumptionProfile, "hourly_profile", []));
+
+    const batterySocSpark = batteryPlan.slice(0, 12).map((slot) => Number(slot.soc || 0));
+    const evPowerSpark = evPlan.slice(0, 12).map((slot) => Number(slot.solar_w || 0) + Number(slot.grid_w || 0));
+    const loadSpark = consumption.slice(0, 12).map((n) => Number(n || 0));
+
+    const solarToHome = Math.max(Math.min(pv, load), 0);
+    const solarToBattery = batteryPower < 0 ? Math.abs(batteryPower) : 0;
+    const batteryToHome = batteryPower > 0 ? batteryPower : 0;
+    const gridToHome = grid > 0 ? grid : 0;
+    const exportToGrid = grid < 0 ? Math.abs(grid) : 0;
+    const solarToEv = Math.max(Math.min(evPower, Math.max(pv - load, 0) + solarToBattery), 0);
+    const gridToEv = evPower > solarToEv ? evPower - solarToEv : 0;
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          color: #eff7f7;
+          --bg: radial-gradient(circle at top left, #173d33 0%, #0b1824 42%, #060b12 100%);
+          --panel: rgba(12, 21, 31, 0.80);
+          --border: rgba(255,255,255,0.08);
+          --muted: #8da3ad;
+          --gold: #ffcc42;
+          --mint: #52e7b5;
+          --blue: #60c8ff;
+          --violet: #9f8cff;
+          --rose: #ff7e8f;
+          --lime: #b6ff69;
+        }
+        * {
+          box-sizing: border-box;
+        }
+        .app {
+          position: relative;
+          overflow: hidden;
+          border-radius: 28px;
+          padding: 24px;
+          background: var(--bg);
+          border: 1px solid rgba(255,255,255,0.06);
+          box-shadow: 0 36px 90px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.05);
+        }
+        .app::before,
+        .app::after {
+          content: "";
+          position: absolute;
+          border-radius: 999px;
+          filter: blur(40px);
+          opacity: 0.22;
+          pointer-events: none;
+        }
+        .app::before {
+          width: 260px;
+          height: 260px;
+          top: -70px;
+          left: -70px;
+          background: #54ffbc;
+        }
+        .app::after {
+          width: 320px;
+          height: 320px;
+          bottom: -120px;
+          right: -100px;
+          background: #4da8ff;
+        }
+        .header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 16px;
+          margin-bottom: 18px;
+          position: relative;
+          z-index: 1;
+        }
+        .title {
+          margin: 0;
+          font: 800 30px/1 "Segoe UI Variable Display", "Segoe UI", sans-serif;
+          letter-spacing: -0.05em;
+        }
+        .subtitle {
+          margin-top: 6px;
+          color: var(--muted);
+          font: 500 13px/1.45 "Segoe UI", sans-serif;
+        }
+        .status-pills {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+        .pill {
+          padding: 8px 12px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.05);
+          border: 1px solid rgba(255,255,255,0.08);
+          font: 700 12px/1 "Segoe UI", sans-serif;
+          color: #f7ffff;
+          backdrop-filter: blur(10px);
+        }
+        .layout {
+          display: grid;
+          grid-template-columns: minmax(0, 1.35fr) minmax(330px, 0.95fr);
+          gap: 16px;
+          position: relative;
+          z-index: 1;
+        }
+        .stack {
+          display: grid;
+          gap: 16px;
+        }
+        .panel {
+          background: var(--panel);
+          border: 1px solid var(--border);
+          border-radius: 24px;
+          padding: 16px;
+          backdrop-filter: blur(16px);
+          min-width: 0;
+        }
+        .panel-title {
+          margin: 0 0 14px;
+          text-transform: uppercase;
+          letter-spacing: 0.12em;
+          color: var(--muted);
+          font: 700 12px/1 "Segoe UI", sans-serif;
+        }
+        .hero {
+          min-height: 420px;
+        }
+        .hero svg {
+          width: 100%;
+          height: 100%;
+          display: block;
+        }
+        .metric-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+        }
+        .metric {
+          border-radius: 18px;
+          padding: 14px;
+          background: rgba(255,255,255,0.04);
+          border: 1px solid rgba(255,255,255,0.06);
+          min-height: 118px;
+        }
+        .metric-top {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 10px;
+        }
+        .metric-label {
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.12em;
+          font: 700 11px/1.2 "Segoe UI", sans-serif;
+        }
+        .metric-value {
+          margin-top: 10px;
+          font: 800 27px/1 "Segoe UI Variable Display", "Segoe UI", sans-serif;
+          letter-spacing: -0.05em;
+        }
+        .metric-hint {
+          margin-top: 8px;
+          color: #d8e6e8;
+          font: 500 12px/1.45 "Segoe UI", sans-serif;
+        }
+        .spark {
+          width: 92px;
+          height: 36px;
+          opacity: 0.9;
+          flex: 0 0 auto;
+        }
+        .chart-grid {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 16px;
+        }
+        .bars {
+          display: grid;
+          gap: 8px;
+        }
+        .bar-row {
+          display: grid;
+          grid-template-columns: 52px 1fr 70px 1fr 70px;
+          gap: 8px;
+          align-items: center;
+        }
+        .bar-label {
+          color: #dce7ea;
+          font: 700 12px/1 "Segoe UI", sans-serif;
+        }
+        .bar-track {
+          height: 12px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.06);
+          overflow: hidden;
+        }
+        .bar-fill {
+          height: 100%;
+          border-radius: 999px;
+          box-shadow: 0 0 20px rgba(255,255,255,0.18);
+        }
+        .bar-value {
+          color: #edf7f7;
+          font: 700 11px/1 "Segoe UI", sans-serif;
+          text-align: right;
+        }
+        .detail-list {
+          display: grid;
+          gap: 10px;
+        }
+        .detail-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: baseline;
+          border-bottom: 1px solid rgba(255,255,255,0.06);
+          padding-bottom: 8px;
+        }
+        .detail-key {
+          color: var(--muted);
+          font: 700 12px/1.2 "Segoe UI", sans-serif;
+          text-transform: uppercase;
+          letter-spacing: 0.1em;
+        }
+        .detail-value {
+          color: #f2fbfb;
+          font: 700 14px/1.35 "Segoe UI", sans-serif;
+          text-align: right;
+        }
+        .toggle-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+        .toggle-card {
+          border-radius: 16px;
+          padding: 12px;
+          background: rgba(255,255,255,0.04);
+          border: 1px solid rgba(255,255,255,0.06);
+        }
+        .toggle-label {
+          color: var(--muted);
+          font: 700 11px/1.2 "Segoe UI", sans-serif;
+          text-transform: uppercase;
+          letter-spacing: 0.1em;
+        }
+        .toggle-state {
+          margin-top: 10px;
+          display: inline-flex;
+          padding: 6px 10px;
+          border-radius: 999px;
+          font: 800 12px/1 "Segoe UI", sans-serif;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+        .toggle-state.on {
+          background: rgba(82,231,181,0.18);
+          color: #85ffce;
+          border: 1px solid rgba(82,231,181,0.35);
+        }
+        .toggle-state.off {
+          background: rgba(255,124,143,0.14);
+          color: #ff98a5;
+          border: 1px solid rgba(255,124,143,0.28);
+        }
+        .toggle-entity {
+          margin-top: 8px;
+          color: #8ea5ad;
+          font: 500 11px/1.35 Consolas, monospace;
+          word-break: break-all;
+        }
+        .empty {
+          color: var(--muted);
+          font: 700 12px/1.4 "Segoe UI", sans-serif;
+        }
+        .empty.large {
+          padding: 12px 0;
+        }
+        @media (max-width: 1100px) {
+          .layout {
+            grid-template-columns: 1fr;
+          }
+        }
+        @media (max-width: 760px) {
+          .metric-grid,
+          .toggle-grid {
+            grid-template-columns: 1fr;
+          }
+          .bar-row {
+            grid-template-columns: 52px 1fr 60px;
+          }
+          .bar-row .bar-track:nth-of-type(2),
+          .bar-row .bar-value:nth-of-type(2) {
+            display: none;
+          }
+        }
+      </style>
+      <div class="app">
+        <div class="header">
+          <div>
+            <h1 class="title">${this._config.title || "SolarFriend Command Center"}</h1>
+            <div class="subtitle">
+              Live energi, sol, husbatteri, EV-ladning og SolarFriend-strategi samlet i ét panel.
+            </div>
+          </div>
+          <div class="status-pills">
+            <div class="pill">Pris ${this._fmtPrice(price)}</div>
+            <div class="pill">Forecast ${this._fmtKwh(forecastRemaining)} tilbage</div>
+            <div class="pill">EV ${this._str(ENTITY.evChargeMode)}</div>
+            <div class="pill">Strategi ${this._str(ENTITY.optimizerStrategy)}</div>
+          </div>
+        </div>
+
+        <div class="layout">
+          <div class="stack">
+            <div class="panel hero">
+              <div class="panel-title">Live Energy Flow</div>
+              <svg viewBox="0 0 760 360" role="img" aria-label="Energy flow">
+                ${this._flowLine(138, 95, 380, 95, "url(#solarLine)", solarToHome > 50 || solarToBattery > 50 || solarToEv > 50)}
+                ${this._flowLine(380, 95, 622, 95, "url(#homeLine)", evPower > 50)}
+                ${this._flowLine(140, 260, 380, 180, "url(#gridLine)", gridToHome > 50 || exportToGrid > 50 || gridToEv > 50)}
+                ${this._flowLine(620, 260, 380, 180, "url(#batteryLine)", solarToBattery > 50 || batteryToHome > 50)}
+                ${this._flowLine(380, 95, 380, 180, "url(#midLine)", load > 50)}
+                <defs>
+                  <linearGradient id="solarLine" x1="0" x2="1">
+                    <stop offset="0%" stop-color="#ffcc42"></stop>
+                    <stop offset="100%" stop-color="#52e7b5"></stop>
+                  </linearGradient>
+                  <linearGradient id="homeLine" x1="0" x2="1">
+                    <stop offset="0%" stop-color="#52e7b5"></stop>
+                    <stop offset="100%" stop-color="#9f8cff"></stop>
+                  </linearGradient>
+                  <linearGradient id="gridLine" x1="0" x2="1">
+                    <stop offset="0%" stop-color="#60c8ff"></stop>
+                    <stop offset="100%" stop-color="#d1f1ff"></stop>
+                  </linearGradient>
+                  <linearGradient id="batteryLine" x1="0" x2="1">
+                    <stop offset="0%" stop-color="#b6ff69"></stop>
+                    <stop offset="100%" stop-color="#52e7b5"></stop>
+                  </linearGradient>
+                  <linearGradient id="midLine" x1="0" x2="1">
+                    <stop offset="0%" stop-color="#52e7b5"></stop>
+                    <stop offset="100%" stop-color="#60c8ff"></stop>
+                  </linearGradient>
+                </defs>
+                ${this._flowNode(138, 95, "SOL", this._fmtKW(pv), "#ffcc42")}
+                ${this._flowNode(380, 95, "HJEM", this._fmtKW(load), "#52e7b5")}
+                ${this._flowNode(622, 95, "EV", this._fmtKW(evPower), "#9f8cff")}
+                ${this._flowNode(140, 260, "NET", exportToGrid > 0 ? `-${this._fmtKW(exportToGrid)}` : this._fmtKW(gridToHome + gridToEv), "#60c8ff")}
+                ${this._flowNode(620, 260, "BAT", `${this._fmtPct(batterySoc)} / ${this._fmtKW(Math.abs(batteryPower))}`, "#b6ff69")}
+                <text x="380" y="330" text-anchor="middle" fill="#8ea5ad" font-size="13" font-weight="700">
+                  SolarFriend holder styr på PV, husforbrug, batteri og EV i realtid
+                </text>
+              </svg>
+            </div>
+
+            <div class="panel">
+              <div class="panel-title">Battery + Load Outlook</div>
+              <div class="metric-grid">
+                ${this._metric("Batteri SOC", this._fmtPct(batterySoc), `Afladninggrænse ${this._num(ENTITY.defaultBatteryDischargeCurrent)} A`, "green", this._spark(batterySocSpark, "#b6ff69", "rgba(182,255,105,0.18)"))}
+                ${this._metric("Forecast Rest", this._fmtKwh(forecastRemaining), `I dag ${this._fmtKwh(forecastToday)} · sikkerhed ${this._fmtPct(confidence)}`, "gold", this._spark(loadSpark, "#ffcc42", "rgba(255,204,66,0.16)"))}
+                ${this._metric("Net Nu", exportToGrid > 0 ? `-${this._fmtKW(exportToGrid)}` : this._fmtKW(grid), exportToGrid > 0 ? "Eksport" : "Import", "blue")}
+                ${this._metric("Batteri Nu", batteryPower >= 0 ? this._fmtKW(batteryPower) : `-${this._fmtKW(Math.abs(batteryPower))}`, batteryPower >= 0 ? "Aflader" : "Lader", "violet")}
+              </div>
+              <div style="margin-top:16px">
+                ${this._bars(
+                  batteryPlan,
+                  ["solar_charge_w", "grid_charge_w"],
+                  ["linear-gradient(90deg,#52e7b5,#b6ff69)", "linear-gradient(90deg,#60c8ff,#9f8cff)"],
+                  (value) => this._fmtW(value)
+                )}
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-title">EV Charging Horizon</div>
+              <div class="metric-grid">
+                ${this._metric("EV Power", this._fmtKW(evPower), `Target ${this._fmtKW(evTargetPower)} · ${this._str(ENTITY.evPhases)} faser`, "violet", this._spark(evPowerSpark, "#9f8cff", "rgba(159,140,255,0.18)"))}
+                ${this._metric("EV Status", this._str(ENTITY.evChargerStatus), this._str(ENTITY.evStrategy), "blue")}
+                ${this._metric("Bil SOC", this._fmtPct(evSoc), `Mål ${this._fmtPct(evTargetSoc)} · mangler ${this._fmtKwh(evMissing)}`, "green")}
+                ${this._metric("Soloverskud", this._fmtW(evSurplus), `Afgang om ${evHours.toFixed(1).replace(".", ",")} t · nød ${this._str(ENTITY.evEmergency)}`, "gold")}
+              </div>
+              <div style="margin-top:16px">
+                ${this._bars(
+                  evPlan,
+                  ["solar_w", "grid_w"],
+                  ["linear-gradient(90deg,#ffcc42,#ff9d3f)", "linear-gradient(90deg,#9f8cff,#60c8ff)"],
+                  (value) => this._fmtW(value)
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div class="stack">
+            <div class="panel">
+              <div class="panel-title">Mission Control</div>
+              <div class="detail-list">
+                <div class="detail-row"><div class="detail-key">Optimizer</div><div class="detail-value">${this._str(ENTITY.optimizerStrategy)}</div></div>
+                <div class="detail-row"><div class="detail-key">Expected Saving</div><div class="detail-value">${this._fmtPrice(this._num(ENTITY.optimizerSaving))}</div></div>
+                <div class="detail-row"><div class="detail-key">PV Nu</div><div class="detail-value">${this._fmtW(pv)}</div></div>
+                <div class="detail-row"><div class="detail-key">Forecast Nu</div><div class="detail-value">${this._fmtW(forecastNow)}</div></div>
+                <div class="detail-row"><div class="detail-key">Load Nu</div><div class="detail-value">${this._fmtW(load)}</div></div>
+                <div class="detail-row"><div class="detail-key">Battery SOC</div><div class="detail-value">${this._fmtPct(batterySoc)}</div></div>
+                <div class="detail-row"><div class="detail-key">EV Mode</div><div class="detail-value">${this._str(ENTITY.evChargeMode)}</div></div>
+                <div class="detail-row"><div class="detail-key">EV Lader</div><div class="detail-value">${this._str(ENTITY.evChargingAllowed)}</div></div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-title">SolarFriend Switchboard</div>
+              <div class="toggle-grid">
+                ${this._toggle("EV Charging Allowed", ENTITY.evChargingAllowed)}
+                ${this._toggle("Solar Only Grid Buffer", ENTITY.solarOnlyGridBuffer)}
+                ${this._toggle("Shadow Log", ENTITY.shadowLog)}
+                ${this._toggle("Solar Sell", ENTITY.deyeSolarSell)}
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-title">Runtime Guard Rails</div>
+              <div class="detail-list">
+                <div class="detail-row"><div class="detail-key">Default Battery Discharge</div><div class="detail-value">${this._num(ENTITY.defaultBatteryDischargeCurrent)} A</div></div>
+                <div class="detail-row"><div class="detail-key">Active Max Battery Discharge</div><div class="detail-value">${this._num(ENTITY.deyeMaxBatteryDischargeCurrent)} A</div></div>
+                <div class="detail-row"><div class="detail-key">EV Strategy</div><div class="detail-value">${this._str(ENTITY.evStrategy)}</div></div>
+                <div class="detail-row"><div class="detail-key">Hours To Departure</div><div class="detail-value">${evHours.toFixed(1).replace(".", ",")} t</div></div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-title">About This Build</div>
+              <div class="detail-value" style="text-align:left;font-weight:600;color:#d7e6e8">
+                Denne version er HA-sikker og selvbærende.
+                Den bruger ingen eksterne CDN-imports og kan derfor testes som panel-script uden D3-afhængigheder.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+}
+
+if (!customElements.get("solarfriend-command-center")) {
+  customElements.define("solarfriend-command-center", SolarFriendCommandCenter);
+}
+
+class MyDashboardPanel extends SolarFriendCommandCenter {
+  set hass(hass) {
+    if (!this._config || !Object.keys(this._config).length) {
+      this._config = { title: "Energi Dashboard" };
+    }
+    super.hass = hass;
+  }
+}
+
+if (!customElements.get("my-dashboard")) {
+  customElements.define("my-dashboard", MyDashboardPanel);
+}

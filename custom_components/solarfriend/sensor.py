@@ -66,6 +66,9 @@ def _forecast_soc_attrs(d: "SolarFriendData", cfg: dict) -> dict:
 def _battery_plan_attrs(d: "SolarFriendData", cfg: dict) -> dict:
     """Expose battery plan series for charts."""
     plan = d.battery_plan or []
+    plan_result = _plan_metrics_result(d)
+    allowed_slots = plan_result.allowed_discharge_slots if plan_result else []
+    allowed_by_hour = {slot["hour"]: slot for slot in allowed_slots}
     return {
         "hourly_plan": plan,
         "hourly_soc": [slot["soc"] for slot in plan],
@@ -77,6 +80,12 @@ def _battery_plan_attrs(d: "SolarFriendData", cfg: dict) -> dict:
         "hourly_grid_import_w": [slot["grid_import_w"] for slot in plan],
         "hourly_price": [slot["price_dkk"] for slot in plan],
         "hourly_sell_price": [slot.get("sell_price_dkk", slot["price_dkk"]) for slot in plan],
+        "allowed_discharge_slots": allowed_slots,
+        "allowed_discharge_hours": [slot["hour_str"] for slot in allowed_slots],
+        "hourly_allowed_discharge_w": [
+            allowed_by_hour.get(slot["hour"], {}).get("baseline_discharge_w", 0)
+            for slot in plan
+        ],
     }
 
 
@@ -455,6 +464,10 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
                 "charge_now": _plan_metrics_result(d).charge_now,
                 "target_soc": _plan_metrics_result(d).target_soc,
                 "best_discharge_hours": _plan_metrics_result(d).best_discharge_hours,
+                "allowed_discharge_slots": _plan_metrics_result(d).allowed_discharge_slots,
+                "allowed_discharge_hours": [
+                    slot["hour_str"] for slot in _plan_metrics_result(d).allowed_discharge_slots
+                ],
             }
             if _plan_metrics_result(d)
             else None

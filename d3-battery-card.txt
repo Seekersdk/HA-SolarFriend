@@ -1,0 +1,624 @@
+/**
+ * SolarFriend Battery Overview D3 Card
+ *
+ * Usage:
+ * 1. Save as /config/www/solarfriend-battery-overview-d3.js
+ * 2. Add as resource:
+ *    url: /local/solarfriend-battery-overview-d3.js
+ *    type: module
+ * 3. Add card:
+ *    type: custom:solarfriend-battery-overview-d3
+ *    title: SolarFriend - Batterioversigt
+ *
+ * Notes:
+ * - Uses D3 from jsDelivr.
+ * - Fetches actual history from Home Assistant recorder API for the current day.
+ * - Planned series come from SolarFriend/Forecast entity attributes.
+ */
+
+const D3_MODULE_URL = "https://cdn.jsdelivr.net/npm/d3@7/+esm";
+
+const ENTITIES = {
+  forecastSolar: "sensor.solcast_pv_forecast_forecast_today",
+  expectedLoad: "sensor.solarfriend_consumption_profile_chart",
+  batteryPlan: "sensor.solarfriend_battery_plan",
+  actualSolar: "sensor.solarfriend_pv_power",
+  actualLoad: "sensor.solarfriend_load_power",
+  actualBatteryPower: "sensor.solarfriend_battery_power",
+  actualBatterySoc: "sensor.solarfriend_battery_soc",
+};
+
+const COLORS = {
+  expectedSolar: "#FFD700",
+  expectedLoad: "#FF6B6B",
+  plannedSolarCharge: "#4FC3F7",
+  plannedGridCharge: "#008FFB",
+  plannedDischarge: "#0288D1",
+  plannedGridImport: "#775DD0",
+  actualSolar: "#FFA500",
+  actualLoad: "#FF4444",
+  actualBatteryCharge: "#29B6F6",
+  actualBatteryDischarge: "#0277BD",
+  actualSoc: "#00C853",
+  plannedSoc: "#69F0AE",
+  now: "#FFFFFF",
+};
+
+class SolarFriendBatteryOverviewD3 extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._hass = null;
+    this._config = { title: "SolarFriend - Batterioversigt" };
+    this._d3 = null;
+    this._historyCache = null;
+    this._historyKey = "";
+    this._historyFetchedAt = 0;
+    this._pendingRender = false;
+    this._legendState = {
+      expectedSolar: true,
+      expectedLoad: true,
+      plannedSolarCharge: true,
+      plannedGridCharge: true,
+      plannedDischarge: true,
+      plannedGridImport: true,
+      actualSolar: true,
+      actualLoad: true,
+      actualBatteryCharge: true,
+      actualBatteryDischarge: true,
+      actualSoc: true,
+      plannedSoc: true,
+    };
+  }
+
+  async setConfig(config) {
+    this._config = { ...this._config, ...(config || {}) };
+    await this._ensureBoot();
+    this._renderShell();
+    this._queueRender();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._queueRender();
+  }
+
+  getCardSize() {
+    return 8;
+  }
+
+  async _ensureBoot() {
+    if (this._d3) return;
+    this._d3 = await import(D3_MODULE_URL);
+  }
+
+  _queueRender() {
+    if (this._pendingRender) return;
+    this._pendingRender = true;
+    requestAnimationFrame(async () => {
+      this._pendingRender = false;
+      await this._render();
+    });
+  }
+
+  _renderShell() {
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          color: #eef6f7;
+          --bg: radial-gradient(circle at top left, #17373e 0%, #0e1b26 45%, #0a1017 100%);
+          --panel: rgba(12, 20, 30, 0.82);
+          --border: rgba(255,255,255,0.08);
+          --text-muted: #93a8b2;
+        }
+        * { box-sizing: border-box; }
+        ha-card {
+          background: var(--bg);
+          border-radius: 28px;
+          overflow: hidden;
+          border: 1px solid rgba(255,255,255,0.06);
+          box-shadow: 0 28px 90px rgba(0,0,0,0.35);
+        }
+        .wrap {
+          padding: 20px;
+        }
+        .header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 16px;
+          margin-bottom: 14px;
+        }
+        .title {
+          margin: 0;
+          font: 800 28px/1 "Segoe UI Variable Display", "Segoe UI", sans-serif;
+          letter-spacing: -0.04em;
+        }
+        .subtitle {
+          margin-top: 6px;
+          color: var(--text-muted);
+          font: 500 13px/1.4 "Segoe UI", sans-serif;
+        }
+        .meta {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+        .pill {
+          padding: 8px 12px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.05);
+          border: 1px solid rgba(255,255,255,0.08);
+          font: 700 12px/1 "Segoe UI", sans-serif;
+        }
+        .panel {
+          background: var(--panel);
+          border: 1px solid var(--border);
+          border-radius: 24px;
+          padding: 14px;
+          backdrop-filter: blur(10px);
+        }
+        .chart-wrap {
+          position: relative;
+          min-height: 470px;
+        }
+        svg {
+          width: 100%;
+          height: 470px;
+          display: block;
+        }
+        .legend {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-top: 12px;
+        }
+        .legend button {
+          cursor: pointer;
+          border: 1px solid rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.04);
+          color: #edf7f8;
+          border-radius: 999px;
+          padding: 7px 10px;
+          font: 700 11px/1 "Segoe UI", sans-serif;
+        }
+        .legend button.off {
+          opacity: 0.45;
+        }
+        .swatch {
+          display: inline-block;
+          width: 9px;
+          height: 9px;
+          border-radius: 999px;
+          margin-right: 7px;
+          vertical-align: middle;
+        }
+        .tooltip {
+          position: absolute;
+          pointer-events: none;
+          min-width: 220px;
+          max-width: 320px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          background: rgba(9, 16, 24, 0.94);
+          border: 1px solid rgba(255,255,255,0.10);
+          color: #f4fbff;
+          font: 600 12px/1.45 "Segoe UI", sans-serif;
+          box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+          opacity: 0;
+          transform: translateY(4px);
+          transition: opacity 120ms ease, transform 120ms ease;
+          z-index: 2;
+        }
+        .tooltip.visible {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        .tooltip-time {
+          color: #9fc0cb;
+          font: 700 11px/1 "Segoe UI", sans-serif;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          margin-bottom: 8px;
+        }
+        .tooltip-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .error {
+          color: #ff9aa7;
+          font: 700 13px/1.4 "Segoe UI", sans-serif;
+          padding: 8px 0;
+        }
+      </style>
+      <ha-card>
+        <div class="wrap">
+          <div class="header">
+            <div>
+              <h1 class="title">${this._config.title}</h1>
+              <div class="subtitle">Plan, faktisk drift, SOC og netimport i ét interaktivt D3-overblik</div>
+            </div>
+            <div class="meta" id="meta"></div>
+          </div>
+          <div class="panel">
+            <div class="chart-wrap">
+              <div class="tooltip" id="tooltip"></div>
+              <div id="chart"></div>
+            </div>
+            <div class="legend" id="legend"></div>
+          </div>
+        </div>
+      </ha-card>
+    `;
+  }
+
+  _state(entityId) {
+    return this._hass?.states?.[entityId];
+  }
+
+  _num(entityId, fallback = 0) {
+    const raw = this._state(entityId)?.state;
+    const num = Number(raw);
+    return Number.isFinite(num) ? num : fallback;
+  }
+
+  _attr(entityId, key, fallback = null) {
+    return this._state(entityId)?.attributes?.[key] ?? fallback;
+  }
+
+  _fmtW(value) {
+    return `${Math.round(value || 0).toLocaleString("da-DK")} W`;
+  }
+
+  _fmtPct(value) {
+    return `${Number(value || 0).toFixed(0)}%`;
+  }
+
+  _fmtKwh(value) {
+    return `${Number(value || 0).toFixed(1).replace(".", ",")} kWh`;
+  }
+
+  _startOfToday() {
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    return now;
+  }
+
+  async _fetchHistory() {
+    const start = this._startOfToday();
+    const end = new Date();
+    const key = `${start.toISOString()}-${end.getHours()}`;
+    const ageMs = Date.now() - this._historyFetchedAt;
+    if (this._historyCache && this._historyKey === key && ageMs < 5 * 60 * 1000) {
+      return this._historyCache;
+    }
+
+    const entityIds = [
+      ENTITIES.actualSolar,
+      ENTITIES.actualLoad,
+      ENTITIES.actualBatteryPower,
+      ENTITIES.actualBatterySoc,
+    ].join(",");
+
+    const query = `history/period/${start.toISOString()}?end_time=${encodeURIComponent(end.toISOString())}&filter_entity_id=${encodeURIComponent(entityIds)}&minimal_response`;
+
+    const rows = await this._hass.callApi("GET", query);
+    const map = {};
+    for (const series of rows || []) {
+      if (!Array.isArray(series) || !series.length) continue;
+      const entityId = series[0]?.entity_id;
+      if (!entityId) continue;
+      map[entityId] = series
+        .map((item) => {
+          const value = Number(item.state);
+          const ts = new Date(item.last_changed || item.last_updated).getTime();
+          if (!Number.isFinite(value) || Number.isNaN(ts)) return null;
+          return { t: ts, v: value };
+        })
+        .filter(Boolean);
+    }
+
+    this._historyCache = map;
+    this._historyKey = key;
+    this._historyFetchedAt = Date.now();
+    return map;
+  }
+
+  _buildPlannedSeries() {
+    const forecast = this._attr(ENTITIES.forecastSolar, "detailedHourly", []) || [];
+    const profile = this._attr(ENTITIES.expectedLoad, "hourly_profile", []) || [];
+    const plan = this._attr(ENTITIES.batteryPlan, "hourly_plan", []) || [];
+    const today = this._startOfToday().getTime();
+
+    return {
+      expectedSolar: forecast.map((f) => ({
+        t: new Date(f.period_start).getTime(),
+        v: Math.round(Number(f.pv_estimate || 0) * 1000),
+      })),
+      expectedLoad: profile.map((watt, hour) => ({
+        t: today + hour * 3600000,
+        v: Number(watt || 0),
+      })),
+      plannedSolarCharge: plan.map((h) => ({ t: new Date(h.hour).getTime(), v: Number(h.solar_charge_w || 0) })),
+      plannedGridCharge: plan.map((h) => ({ t: new Date(h.hour).getTime(), v: Number(h.grid_charge_w || 0) })),
+      plannedDischarge: plan.map((h) => ({ t: new Date(h.hour).getTime(), v: Number(h.discharge_w || 0) })),
+      plannedGridImport: plan.map((h) => ({ t: new Date(h.hour).getTime(), v: Number(h.grid_import_w || 0) })),
+      plannedSoc: plan.map((h) => ({ t: new Date(h.hour).getTime(), v: Number(h.soc || 0) })),
+    };
+  }
+
+  _buildActualSeries(history) {
+    const batteryPower = history[ENTITIES.actualBatteryPower] || [];
+    return {
+      actualSolar: history[ENTITIES.actualSolar] || [],
+      actualLoad: history[ENTITIES.actualLoad] || [],
+      actualBatteryCharge: batteryPower.map((p) => ({ t: p.t, v: p.v < 0 ? Math.abs(p.v) : 0 })),
+      actualBatteryDischarge: batteryPower.map((p) => ({ t: p.t, v: p.v > 0 ? p.v : 0 })),
+      actualSoc: history[ENTITIES.actualBatterySoc] || [],
+    };
+  }
+
+  _seriesMeta() {
+    return [
+      ["expectedSolar", "Forventet sol", COLORS.expectedSolar, "power", "area"],
+      ["expectedLoad", "Forventet forbrug", COLORS.expectedLoad, "power", "area"],
+      ["plannedSolarCharge", "Forventet batteri ladning fra sol", COLORS.plannedSolarCharge, "power", "area"],
+      ["plannedGridCharge", "Forventet batteri ladning fra net", COLORS.plannedGridCharge, "power", "area"],
+      ["plannedDischarge", "Forventet batteri afladning", COLORS.plannedDischarge, "power", "area"],
+      ["plannedGridImport", "Forventet netimport", COLORS.plannedGridImport, "power", "line-dash"],
+      ["actualSolar", "Faktisk sol", COLORS.actualSolar, "power", "line"],
+      ["actualLoad", "Faktisk forbrug", COLORS.actualLoad, "power", "line"],
+      ["actualBatteryCharge", "Faktisk batteri ladning", COLORS.actualBatteryCharge, "power", "line"],
+      ["actualBatteryDischarge", "Faktisk batteri afladning", COLORS.actualBatteryDischarge, "power", "line"],
+      ["actualSoc", "Batteri SOC faktisk", COLORS.actualSoc, "soc", "line"],
+      ["plannedSoc", "Batteri SOC forventet", COLORS.plannedSoc, "soc", "line-dash"],
+    ];
+  }
+
+  _buildLegend() {
+    const legend = this.shadowRoot.getElementById("legend");
+    legend.innerHTML = "";
+    for (const [key, label, color] of this._seriesMeta()) {
+      const button = document.createElement("button");
+      button.className = this._legendState[key] ? "" : "off";
+      button.innerHTML = `<span class="swatch" style="background:${color}"></span>${label}`;
+      button.addEventListener("click", () => {
+        this._legendState[key] = !this._legendState[key];
+        this._queueRender();
+      });
+      legend.appendChild(button);
+    }
+  }
+
+  _renderMeta() {
+    const meta = this.shadowRoot.getElementById("meta");
+    meta.innerHTML = `
+      <div class="pill">SOC ${this._fmtPct(this._num(ENTITIES.actualBatterySoc))}</div>
+      <div class="pill">Pris ${Number(this._num("sensor.solarfriend_current_price")).toFixed(3).replace(".", ",")} kr/kWh</div>
+      <div class="pill">PV nu ${this._fmtW(this._num(ENTITIES.actualSolar))}</div>
+      <div class="pill">Load nu ${this._fmtW(this._num(ENTITIES.actualLoad))}</div>
+    `;
+  }
+
+  _nearestValue(points, x) {
+    if (!points.length) return null;
+    let best = points[0];
+    let bestDist = Math.abs(best.t - x);
+    for (let i = 1; i < points.length; i += 1) {
+      const dist = Math.abs(points[i].t - x);
+      if (dist < bestDist) {
+        best = points[i];
+        bestDist = dist;
+      }
+    }
+    return best;
+  }
+
+  async _render() {
+    if (!this._hass) return;
+    try {
+      await this._ensureBoot();
+      if (!this.shadowRoot.querySelector("ha-card")) {
+        this._renderShell();
+      }
+      this._renderMeta();
+      this._buildLegend();
+
+      const d3 = this._d3;
+      const chartRoot = this.shadowRoot.getElementById("chart");
+      const tooltip = this.shadowRoot.getElementById("tooltip");
+      chartRoot.innerHTML = "";
+
+      const planned = this._buildPlannedSeries();
+      const actual = this._buildActualSeries(await this._fetchHistory());
+      const allSeries = { ...planned, ...actual };
+
+      const enabledKeys = this._seriesMeta().filter(([key]) => this._legendState[key]).map(([key]) => key);
+      const allPoints = enabledKeys.flatMap((key) => allSeries[key] || []);
+      if (!allPoints.length) {
+        chartRoot.innerHTML = `<div class="error">Ingen data til grafen endnu.</div>`;
+        return;
+      }
+
+      const width = chartRoot.clientWidth || 1040;
+      const height = 470;
+      const margin = { top: 18, right: 62, bottom: 36, left: 62 };
+      const innerW = width - margin.left - margin.right;
+      const innerH = height - margin.top - margin.bottom;
+
+      const svg = d3.create("svg").attr("viewBox", `0 0 ${width} ${height}`);
+      const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+      const x = d3.scaleTime()
+        .domain([this._startOfToday(), new Date(this._startOfToday().getTime() + 24 * 3600000)])
+        .range([0, innerW]);
+
+      const powerValues = enabledKeys
+        .filter((key) => this._seriesMeta().find((m) => m[0] === key)?.[3] === "power")
+        .flatMap((key) => (allSeries[key] || []).map((p) => p.v));
+      const socValues = enabledKeys
+        .filter((key) => this._seriesMeta().find((m) => m[0] === key)?.[3] === "soc")
+        .flatMap((key) => (allSeries[key] || []).map((p) => p.v));
+
+      const yPower = d3.scaleLinear()
+        .domain([0, Math.max(5500, d3.max(powerValues) || 0) * 1.08])
+        .range([innerH, 0]);
+      const ySoc = d3.scaleLinear().domain([0, 100]).range([innerH, 0]);
+
+      g.append("g")
+        .selectAll("line")
+        .data(yPower.ticks(6))
+        .enter()
+        .append("line")
+        .attr("x1", 0)
+        .attr("x2", innerW)
+        .attr("y1", (d) => yPower(d))
+        .attr("y2", (d) => yPower(d))
+        .attr("stroke", "rgba(255,255,255,0.08)");
+
+      g.append("g")
+        .attr("transform", `translate(0,${innerH})`)
+        .call(d3.axisBottom(x).ticks(d3.timeHour.every(2)).tickFormat(d3.timeFormat("%H:%M")))
+        .call((axis) => axis.selectAll("text").attr("fill", "#9db0b8"))
+        .call((axis) => axis.selectAll("line,path").attr("stroke", "rgba(255,255,255,0.18)"));
+
+      g.append("g")
+        .call(d3.axisLeft(yPower).ticks(6).tickFormat((d) => `${Math.round(d)} W`))
+        .call((axis) => axis.selectAll("text").attr("fill", "#9db0b8"))
+        .call((axis) => axis.selectAll("line,path").attr("stroke", "rgba(255,255,255,0.18)"));
+
+      g.append("g")
+        .attr("transform", `translate(${innerW},0)`)
+        .call(d3.axisRight(ySoc).ticks(5).tickFormat((d) => `${Math.round(d)}%`))
+        .call((axis) => axis.selectAll("text").attr("fill", "#9db0b8"))
+        .call((axis) => axis.selectAll("line,path").attr("stroke", "rgba(255,255,255,0.18)"));
+
+      const area = d3.area()
+        .defined((d) => Number.isFinite(d.v))
+        .x((d) => x(d.t))
+        .y0(innerH)
+        .y1((d) => yPower(d.v))
+        .curve(d3.curveCatmullRom.alpha(0.4));
+
+      const linePower = d3.line()
+        .defined((d) => Number.isFinite(d.v))
+        .x((d) => x(d.t))
+        .y((d) => yPower(d.v))
+        .curve(d3.curveCatmullRom.alpha(0.4));
+
+      const lineSoc = d3.line()
+        .defined((d) => Number.isFinite(d.v))
+        .x((d) => x(d.t))
+        .y((d) => ySoc(d.v))
+        .curve(d3.curveCatmullRom.alpha(0.4));
+
+      for (const [key, , color, axis, style] of this._seriesMeta()) {
+        if (!this._legendState[key]) continue;
+        const data = allSeries[key] || [];
+        if (!data.length) continue;
+
+        if (style === "area") {
+          g.append("path")
+            .datum(data)
+            .attr("fill", color)
+            .attr("opacity", 0.24)
+            .attr("d", area);
+          g.append("path")
+            .datum(data)
+            .attr("fill", "none")
+            .attr("stroke", color)
+            .attr("stroke-width", 1.4)
+            .attr("opacity", 0.9)
+            .attr("d", linePower);
+        } else {
+          const line = axis === "soc" ? lineSoc : linePower;
+          const path = g.append("path")
+            .datum(data)
+            .attr("fill", "none")
+            .attr("stroke", color)
+            .attr("stroke-width", axis === "soc" ? 2.1 : 2)
+            .attr("d", line);
+          if (style === "line-dash") {
+            path.attr("stroke-dasharray", "6 6");
+          }
+        }
+      }
+
+      const now = Date.now();
+      g.append("line")
+        .attr("x1", x(now))
+        .attr("x2", x(now))
+        .attr("y1", 0)
+        .attr("y2", innerH)
+        .attr("stroke", COLORS.now)
+        .attr("stroke-width", 1.2)
+        .attr("stroke-dasharray", "5 6")
+        .attr("opacity", 0.7);
+
+      const focus = g.append("line")
+        .attr("y1", 0)
+        .attr("y2", innerH)
+        .attr("stroke", "#ffffff")
+        .attr("stroke-width", 1)
+        .attr("stroke-dasharray", "3 6")
+        .attr("opacity", 0);
+
+      const overlay = g.append("rect")
+        .attr("width", innerW)
+        .attr("height", innerH)
+        .attr("fill", "transparent");
+
+      overlay
+        .on("mousemove", (event) => {
+          const [mx] = d3.pointer(event);
+          const time = x.invert(mx).getTime();
+          focus.attr("x1", mx).attr("x2", mx).attr("opacity", 0.7);
+
+          const rows = [];
+          for (const [key, label, color] of this._seriesMeta()) {
+            if (!this._legendState[key]) continue;
+            const nearest = this._nearestValue(allSeries[key] || [], time);
+            if (!nearest) continue;
+            const formatted = key.includes("Soc") || key === "plannedSoc"
+              ? `${nearest.v.toFixed(0)}%`
+              : `${Math.round(nearest.v)} W`;
+            rows.push(`<div class="tooltip-row"><span style="color:${color}">${label}</span><strong>${formatted}</strong></div>`);
+          }
+
+          tooltip.innerHTML = `
+            <div class="tooltip-time">${d3.timeFormat("%d/%m %H:%M")(new Date(time))}</div>
+            ${rows.join("")}
+          `;
+          tooltip.classList.add("visible");
+
+          const containerRect = this.shadowRoot.querySelector(".chart-wrap").getBoundingClientRect();
+          const tipWidth = 250;
+          let left = event.clientX - containerRect.left + 14;
+          const top = event.clientY - containerRect.top + 14;
+          if (left + tipWidth > containerRect.width) {
+            left = event.clientX - containerRect.left - tipWidth - 16;
+          }
+          tooltip.style.left = `${left}px`;
+          tooltip.style.top = `${top}px`;
+        })
+        .on("mouseleave", () => {
+          focus.attr("opacity", 0);
+          tooltip.classList.remove("visible");
+        });
+
+      chartRoot.appendChild(svg.node());
+    } catch (err) {
+      const chartRoot = this.shadowRoot.getElementById("chart");
+      if (chartRoot) {
+        chartRoot.innerHTML = `<div class="error">Kunne ikke loade D3-kortet: ${err?.message || err}</div>`;
+      }
+    }
+  }
+}
+
+if (!customElements.get("solarfriend-battery-overview-d3")) {
+  customElements.define("solarfriend-battery-overview-d3", SolarFriendBatteryOverviewD3);
+}

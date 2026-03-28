@@ -1,0 +1,176 @@
+type: custom:apexcharts-card
+header:
+  title: 🔋 SolarFriend — Batterioversigt
+  show: true
+graph_span: 1d
+span:
+  start: day
+now:
+  show: true
+  label: Nu
+apex_config:
+  chart:
+    height: 450
+  tooltip:
+    shared: true
+yaxis:
+  - id: power
+    min: 0
+    max: 5500
+  - id: soc
+    opposite: true
+    min: 0
+    max: 100
+series:
+  - entity: sensor.solcast_pv_forecast_forecast_today
+    name: Forventet sol
+    color: "#FFD700"
+    opacity: 0.3
+    type: area
+    yaxis_id: power
+    unit: W
+    data_generator: |
+      const forecast = entity.attributes.detailedHourly || [];
+      return forecast.map(f => [
+        new Date(f.period_start).getTime(),
+        Math.round(f.pv_estimate * 1000)
+      ]);
+  - entity: sensor.solarfriend_consumption_profile_chart
+    name: Forventet forbrug
+    color: "#FF6B6B"
+    opacity: 0.3
+    type: area
+    yaxis_id: power
+    unit: W
+    data_generator: |
+      const profile = entity.attributes.hourly_profile || [];
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      return profile.map((watt, hour) => [
+        today.getTime() + hour * 3600000,
+        watt
+      ]);
+  - entity: sensor.solarfriend_battery_plan
+    name: Forventet batteri ladning fra sol
+    color: "#4FC3F7"
+    opacity: 0.25
+    type: area
+    yaxis_id: power
+    unit: W
+    data_generator: |
+      const plan = entity.attributes.hourly_plan || [];
+      return plan.map(h => [
+        new Date(h.hour).getTime(),
+        h.solar_charge_w || 0
+      ]);
+  - entity: sensor.solarfriend_battery_plan
+    name: Forventet batteri ladning fra net
+    color: "#008FFB"
+    opacity: 0.2
+    type: area
+    yaxis_id: power
+    unit: W
+    data_generator: |
+      const plan = entity.attributes.hourly_plan || [];
+      return plan.map(h => [
+        new Date(h.hour).getTime(),
+        h.grid_charge_w || 0
+      ]);
+  - entity: sensor.solarfriend_battery_plan
+    name: Forventet batteri afladning
+    color: "#0288D1"
+    opacity: 0.25
+    type: area
+    yaxis_id: power
+    unit: W
+    data_generator: |
+      const plan = entity.attributes.hourly_plan || [];
+      return plan.map(h => [
+        new Date(h.hour).getTime(),
+        h.discharge_w || 0
+      ]);
+  - entity: sensor.solarfriend_battery_plan
+    name: Forventet netimport
+    color: "#775DD0"
+    type: line
+    stroke_width: 1
+    stroke_dash: 4
+    yaxis_id: power
+    unit: W
+    data_generator: |
+      const plan = entity.attributes.hourly_plan || [];
+      return plan.map(h => [
+        new Date(h.hour).getTime(),
+        h.grid_import_w || 0
+      ]);
+  - entity: sensor.solarfriend_pv_power
+    name: Faktisk sol
+    color: "#FFA500"
+    type: line
+    stroke_width: 2
+    extend_to: false
+    yaxis_id: power
+    statistics:
+      type: mean
+      period: 5minute
+      align: middle
+  - entity: sensor.solarfriend_load_power
+    name: Faktisk forbrug
+    color: "#FF4444"
+    type: line
+    stroke_width: 2
+    extend_to: false
+    yaxis_id: power
+    statistics:
+      type: mean
+      period: 5minute
+      align: middle
+  - entity: sensor.solarfriend_battery_power
+    name: Faktisk batteri ladning
+    color: "#29B6F6"
+    type: line
+    stroke_width: 2
+    extend_to: false
+    yaxis_id: power
+    transform: "return x < 0 ? Math.abs(x) : 0;"
+    statistics:
+      type: mean
+      period: 5minute
+      align: middle
+  - entity: sensor.solarfriend_battery_power
+    name: Faktisk batteri afladning
+    color: "#0277BD"
+    type: line
+    stroke_width: 2
+    extend_to: false
+    yaxis_id: power
+    transform: "return x > 0 ? x : 0;"
+    statistics:
+      type: mean
+      period: 5minute
+      align: middle
+  - entity: sensor.solarfriend_battery_soc
+    name: Batteri SOC faktisk
+    color: "#00C853"
+    type: line
+    stroke_width: 2
+    extend_to: false
+    yaxis_id: soc
+    statistics:
+      type: mean
+      period: 5minute
+      align: middle
+  - entity: sensor.solarfriend_battery_plan
+    name: Batteri SOC forventet
+    color: "#69F0AE"
+    type: line
+    stroke_width: 1
+    stroke_dash: 5
+    yaxis_id: soc
+    unit: "%"
+    data_generator: |
+      const plan = entity.attributes.hourly_plan || [];
+      return plan.map(h => [
+        new Date(h.hour).getTime(),
+        h.soc || 0
+      ]);

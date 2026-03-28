@@ -525,6 +525,34 @@ def test_async_on_runtime_setting_changed_rebuilds_runtime_and_reoptimizes():
     assert optimize_calls == [("number-updated", True, True)]
 
 
+def test_price_state_change_forces_immediate_reoptimize():
+    coordinator = SolarFriendCoordinator.__new__(SolarFriendCoordinator)
+    coordinator._entry = _make_entry()
+    coordinator._last_optimize_soc = None
+
+    optimize_calls: list[tuple[str, bool, bool]] = []
+
+    async def _fake_trigger_optimize(reason="event", notify=False, force=False):
+        optimize_calls.append((reason, notify, force))
+
+    coordinator._trigger_optimize = _fake_trigger_optimize
+    coordinator.hass = types.SimpleNamespace(
+        async_create_task=lambda coro: asyncio.run(coro),
+        states=types.SimpleNamespace(get=lambda entity_id: None),
+    )
+
+    event = types.SimpleNamespace(
+        data={
+            "entity_id": "sensor.buy_price",
+            "new_state": _FakeState("1.25"),
+        }
+    )
+
+    coordinator._async_on_relevant_state_change(event)
+
+    assert optimize_calls == [("price_updated", True, True)]
+
+
 def test_ev_mode_select_triggers_immediate_runtime_refresh():
     entry = _make_entry(ev_charging_enabled=True)
     coordinator = types.SimpleNamespace(

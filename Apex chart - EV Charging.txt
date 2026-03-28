@@ -1,0 +1,98 @@
+type: custom:apexcharts-card
+header:
+  title: ⚡ EV Ladeplan — 48 timer
+  show: true
+  show_states: false
+update_interval: 60s
+graph_span: 48h
+span:
+  start: hour
+  offset: "-2h"
+now:
+  show: true
+  label: Nu
+apex_config:
+  chart:
+    height: 320
+    toolbar:
+      show: false
+  xaxis:
+    type: datetime
+    labels:
+      datetimeFormatter:
+        hour: HH:mm
+        day: dd/MM
+  yaxis:
+    - id: price
+      min: 0
+      decimalsInFloat: 2
+      title:
+        text: kr/kWh
+    - id: power
+      opposite: true
+      min: 0
+      decimalsInFloat: 0
+      title:
+        text: Watt
+  tooltip:
+    shared: true
+    x:
+      format: dd/MM HH:mm
+series:
+  - entity: sensor.energi_data_service
+    name: Spotpris
+    yaxis_id: price
+    color: "#FF4560"
+    type: line
+    stroke_width: 1
+    curve: stepline
+    opacity: 0.9
+    unit: kr
+    data_generator: |
+      const raw = [
+        ...(entity.attributes.raw_today || []),
+        ...(entity.attributes.raw_tomorrow || [])
+      ];
+      const seen = new Set();
+      return raw
+        .filter(h => {
+          const t = new Date(h.hour).setMinutes(0, 0, 0);
+          if (seen.has(t)) return false;
+          seen.add(t);
+          return true;
+        })
+        .map(h => [new Date(h.hour).getTime(), h.price]);
+  - entity: sensor.solarfriend_ev_ev_plan
+    name: Sol-ladning
+    yaxis_id: power
+    color: "#FFB800"
+    type: area
+    opacity: 0.6
+    stroke_width: 0
+    unit: W
+    data_generator: |
+      const plan = entity.attributes.hourly_plan || [];
+      if (!plan.length) return [];
+      const points = plan.map(h => [
+        new Date(h.hour).getTime(), h.solar_w || 0
+      ]);
+      const lastTs = new Date(plan[plan.length - 1].hour).getTime();
+      points.push([lastTs + 3600000, 0]);
+      return points;
+  - entity: sensor.solarfriend_ev_ev_plan
+    name: Net-ladning
+    yaxis_id: power
+    color: "#008FFB"
+    type: area
+    opacity: 0.6
+    stroke_width: 0
+    unit: W
+    data_generator: |
+      const plan = entity.attributes.hourly_plan || [];
+      if (!plan.length) return [];
+      const points = plan.map(h => [
+        new Date(h.hour).getTime(), h.grid_w || 0
+      ]);
+      const lastTs = new Date(plan[plan.length - 1].hour).getTime();
+      points.push([lastTs + 3600000, 0]);
+      return points;
