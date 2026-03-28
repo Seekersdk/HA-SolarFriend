@@ -321,9 +321,11 @@ def test_days_collected_ignores_sparse_buckets():
 
 
 def test_get_predicted_watt_falls_back_to_weekday_when_weekend_is_sparse():
-    """Weekend predictions should use weekday data when weekend bucket is too sparse."""
+    """Weekend predictions should use weekday data when weekend profile is still immature."""
     profile = ConsumptionProfile()
-    profile._profiles["weekday"][20]["samples"] = 8
+    for hour in range(24):
+        profile._profiles["weekday"][hour]["samples"] = 8
+        profile._profiles["weekday"][hour]["avg_watt"] = 900.0 + hour
     profile._profiles["weekday"][20]["avg_watt"] = 1450.0
     profile._profiles["weekend"][20]["samples"] = 1
     profile._profiles["weekend"][20]["avg_watt"] = 0.0
@@ -331,10 +333,25 @@ def test_get_predicted_watt_falls_back_to_weekday_when_weekend_is_sparse():
     assert profile.get_predicted_watt(20, is_weekend=True) == 1450.0
 
 
+def test_get_predicted_watt_keeps_weekend_when_weekend_profile_is_mature():
+    """Weekend predictions should stay on weekend once the weekend profile has enough days."""
+    profile = ConsumptionProfile()
+    for hour in range(24):
+        profile._profiles["weekday"][hour]["samples"] = 8
+        profile._profiles["weekday"][hour]["avg_watt"] = 900.0 + hour
+        profile._profiles["weekend"][hour]["samples"] = 8
+        profile._profiles["weekend"][hour]["avg_watt"] = 1200.0 + hour
+
+    assert profile.get_predicted_watt(20, is_weekend=True) == 1220.0
+
+
 def test_debug_snapshot_reports_fallback_hours():
     """Diagnostics should expose which hours are using fallback day-type data."""
     profile = ConsumptionProfile()
-    profile._profiles["weekday"][0]["samples"] = 6
+    for hour in range(24):
+        profile._profiles["weekday"][hour]["samples"] = 8
+        profile._profiles["weekday"][hour]["avg_watt"] = 800.0 + hour
+    profile._profiles["weekday"][0]["samples"] = 8
     profile._profiles["weekday"][0]["avg_watt"] = 900.0
     profile._profiles["weekend"][0]["samples"] = 1
     profile._profiles["weekend"][0]["avg_watt"] = 0.0
@@ -342,6 +359,20 @@ def test_debug_snapshot_reports_fallback_hours():
     snapshot = profile.build_debug_snapshot()
 
     assert 0 in snapshot["weekend"]["fallback_hours"]
+    assert snapshot["weekend"]["days_estimate"] == 0
+    assert snapshot["weekday"]["days_estimate"] == 2
+
+
+def test_days_collected_remains_max_of_profile_maturity():
+    """Overall maturity may be high even when weekend still falls back to weekday."""
+    profile = ConsumptionProfile()
+    for hour in range(24):
+        profile._profiles["weekday"][hour]["samples"] = 8
+        profile._profiles["weekday"][hour]["avg_watt"] = 900.0 + hour
+    profile._profiles["weekend"][20]["samples"] = 3
+
+    assert profile.days_collected == 2
+    assert profile.get_predicted_watt(20, is_weekend=True) == 920.0
 
 
 def test_bootstrap_power_history_integrates_time_weighted_load():

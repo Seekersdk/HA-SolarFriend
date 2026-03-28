@@ -24,6 +24,7 @@ _SEED_MATCH_REL = 0.05
 _SEED_HISTORY_WEIGHT = 3.0
 _SEED_MIN_DIRECT_SAMPLES = 3.0
 _PROFILE_FALLBACK_MIN_SAMPLES = 3.0
+_PROFILE_FALLBACK_MIN_DAYS = 2
 
 
 def _to_float(value: Any) -> float | None:
@@ -90,16 +91,32 @@ class ConsumptionProfile:
         """Map a timestamp to profile bucket."""
         return ("weekday" if dt.weekday() < 5 else "weekend", dt.hour)
 
+    def _profile_days_estimate(self, profile_key: str) -> int:
+        """Estimate maturity for a single day-type profile."""
+        profile = self._profiles[profile_key]
+        populated = [float(slot["samples"]) for slot in profile.values() if slot["samples"] > 0]
+        if len(populated) < 6:
+            return 0
+        populated.sort()
+        median_samples = populated[len(populated) // 2]
+        return int(median_samples // 4)
+
     def _resolve_slot(self, hour: int, is_weekend: bool) -> tuple[str, dict[str, float]]:
         """Return the best available slot, falling back to the opposite day type if needed."""
         profile_key = "weekend" if is_weekend else "weekday"
         slot = self._profiles[profile_key][hour]
-        if slot["samples"] >= _PROFILE_FALLBACK_MIN_SAMPLES:
+        if (
+            self._profile_days_estimate(profile_key) >= _PROFILE_FALLBACK_MIN_DAYS
+            and slot["samples"] >= _PROFILE_FALLBACK_MIN_SAMPLES
+        ):
             return profile_key, slot
 
         fallback_key = "weekday" if is_weekend else "weekend"
         fallback_slot = self._profiles[fallback_key][hour]
-        if fallback_slot["samples"] >= _PROFILE_FALLBACK_MIN_SAMPLES:
+        if (
+            self._profile_days_estimate(fallback_key) >= _PROFILE_FALLBACK_MIN_DAYS
+            and fallback_slot["samples"] >= _PROFILE_FALLBACK_MIN_SAMPLES
+        ):
             return fallback_key, fallback_slot
 
         return profile_key, slot
@@ -489,16 +506,7 @@ class ConsumptionProfile:
     @property
     def days_collected(self) -> int:
         """Estimate learning maturity without letting sparse buckets reset progress."""
-        day_estimates: list[int] = []
-        for profile in self._profiles.values():
-            populated = [slot["samples"] for slot in profile.values() if slot["samples"] > 0]
-            if len(populated) < 6:
-                day_estimates.append(0)
-                continue
-            populated.sort()
-            median_samples = populated[len(populated) // 2]
-            day_estimates.append(int(median_samples // 4))
-        return max(day_estimates, default=0)
+        return max((self._profile_days_estimate(profile_key) for profile_key in self._profiles), default=0)
 
     def build_debug_snapshot(self) -> dict[str, Any]:
         """Expose raw learning metrics behind days_collected for diagnostics."""
@@ -510,7 +518,7 @@ class ConsumptionProfile:
             snapshot[profile_key] = {
                 "populated_hours": len(populated),
                 "median_samples": median_samples,
-                "days_estimate": int(median_samples // 4) if len(populated) >= 6 else 0,
+                "days_estimate": self._profile_days_estimate(profile_key),
                 "fallback_hours": [
                     hour
                     for hour in range(24)
