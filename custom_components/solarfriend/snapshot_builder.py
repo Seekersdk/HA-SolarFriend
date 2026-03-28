@@ -116,6 +116,9 @@ class SnapshotBuilder:
         profile_key = "weekend" if is_weekend else "weekday"
         hourly: list[float] = []
         for hour in range(24):
+            if hasattr(profile, "get_predicted_watt"):
+                hourly.append(round(float(profile.get_predicted_watt(hour, is_weekend)), 1))
+                continue
             slot = profile._profiles[profile_key][hour]
             avg = round(slot["avg_watt"], 1) if slot["samples"] >= 3 else 0.0
             hourly.append(avg)

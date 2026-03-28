@@ -74,6 +74,7 @@ from custom_components.solarfriend.consumption_profile import (  # noqa: E402
     _percentile_filter,
 )
 from custom_components.solarfriend.forecast_adapter import get_forecast_for_period  # noqa: E402
+from custom_components.solarfriend.snapshot_builder import SnapshotBuilder  # noqa: E402
 
 # _clean_load_w is a static method — grab it for convenience
 _clean_load_w = ConsumptionProfile._clean_load_w
@@ -373,6 +374,28 @@ def test_days_collected_remains_max_of_profile_maturity():
 
     assert profile.days_collected == 2
     assert profile.get_predicted_watt(20, is_weekend=True) == 920.0
+
+
+def test_consumption_profile_chart_uses_fallback_prediction_logic():
+    """Published chart should use the same fallback path as optimizer predictions."""
+    profile = ConsumptionProfile()
+    for hour in range(24):
+        profile._profiles["weekday"][hour]["samples"] = 8
+        profile._profiles["weekday"][hour]["avg_watt"] = 1000.0 + hour
+    profile._profiles["weekend"][20]["samples"] = 1
+    profile._profiles["weekend"][20]["avg_watt"] = 0.0
+
+    builder = SnapshotBuilder()
+    data = types.SimpleNamespace(consumption_profile_chart=[], consumption_profile_day_type="")
+
+    builder.apply_consumption_profile_chart(
+        data=data,
+        now=datetime(2026, 3, 28, 12, 0, 0),  # Saturday
+        profile=profile,
+    )
+
+    assert data.consumption_profile_day_type == "weekend"
+    assert data.consumption_profile_chart[20] == 1020.0
 
 
 def test_bootstrap_power_history_integrates_time_weighted_load():
