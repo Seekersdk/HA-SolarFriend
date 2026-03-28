@@ -270,7 +270,8 @@ class BatteryOptimizer:
             if slot_idx >= len(slots):
                 return 0.0, ()
 
-            stored_after_solar = min(capacity_units, stored_units + solar_surplus_units[slot_idx])
+            solar_stored_units = min(solar_surplus_units[slot_idx], max(0, capacity_units - stored_units))
+            stored_after_solar = min(capacity_units, stored_units + solar_stored_units)
             max_discharge_units = min(
                 charge_limit_units[slot_idx],
                 stored_after_solar,
@@ -288,11 +289,14 @@ class BatteryOptimizer:
                 for charge_units in charge_range:
                     discharge_to_load_units = min(net_load_units[slot_idx], discharge_units)
                     export_units = max(0, discharge_units - discharge_to_load_units)
+                    if solar_stored_units > 0 and export_units > 0:
+                        continue
                     next_stored_units = stored_after_solar - discharge_units + charge_units
                     grid_import_units = max(0, net_load_units[slot_idx] - discharge_to_load_units) + charge_units
                     step_cost = (
                         (grid_import_units * quantum_kwh * slots[slot_idx]["price"])
                         + (charge_units * quantum_kwh * self.battery_cost_per_kwh)
+                        + (solar_stored_units * quantum_kwh * slots[slot_idx]["sell_price"])
                         + (discharge_units * quantum_kwh * weighted_cost)
                         - (export_units * quantum_kwh * slots[slot_idx]["sell_price"])
                     )
