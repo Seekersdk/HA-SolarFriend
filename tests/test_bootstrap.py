@@ -74,6 +74,7 @@ from custom_components.solarfriend.consumption_profile import (  # noqa: E402
     _percentile_filter,
 )
 from custom_components.solarfriend.forecast_adapter import get_forecast_for_period  # noqa: E402
+from custom_components.solarfriend.price_adapter import PriceAdapter  # noqa: E402
 from custom_components.solarfriend.snapshot_builder import SnapshotBuilder  # noqa: E402
 
 # _clean_load_w is a static method — grab it for convenience
@@ -593,3 +594,32 @@ def test_get_forecast_for_period_handles_aware_range_and_naive_slots():
         datetime.fromisoformat("2026-03-26T12:00:00+00:00"),
     )
     assert total == 1.0
+
+
+def test_price_adapter_accepts_raw_today_when_raw_tomorrow_is_missing():
+    """A valid raw_today list must build a horizon even when raw_tomorrow is None."""
+    import custom_components.solarfriend.price_adapter as price_adapter_module
+
+    original_now = price_adapter_module.ha_dt.now
+    price_adapter_module.ha_dt.now = lambda: datetime(2026, 3, 28, 0, 15, 0)
+    try:
+        state = types.SimpleNamespace(
+            state="1.267",
+            attributes={
+                "raw_today": [
+                    {"hour": "2026-03-28T00:00:00", "price": 1.267},
+                    {"hour": "2026-03-28T01:00:00", "price": 1.238},
+                ],
+                "raw_tomorrow": None,
+            },
+        )
+        hass = types.SimpleNamespace(states=types.SimpleNamespace(get=lambda entity_id: state))
+
+        snapshot = PriceAdapter.from_hass(hass, "sensor.price")
+
+        assert snapshot is not None
+        assert snapshot.current_price == 1.267
+        assert len(snapshot.points) == 2
+        assert snapshot.to_legacy_raw_prices()[0]["price"] == 1.267
+    finally:
+        price_adapter_module.ha_dt.now = original_now

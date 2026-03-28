@@ -121,8 +121,10 @@ class PriceAdapter:
 
         raw_today = state.attributes.get("raw_today", []) or []
         raw_tomorrow = state.attributes.get("raw_tomorrow", []) or []
-        if isinstance(raw_today, list) and isinstance(raw_tomorrow, list):
-            raw_prices = raw_today + raw_tomorrow
+        if isinstance(raw_today, list):
+            raw_prices.extend(raw_today)
+        if isinstance(raw_tomorrow, list):
+            raw_prices.extend(raw_tomorrow)
 
         if not raw_prices:
             for attr_key in ("today", "prices"):
