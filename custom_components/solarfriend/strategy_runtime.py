@@ -53,6 +53,13 @@ class StrategyRuntime:
     ) -> bool:
         if desired_result.strategy == "ANTI_EXPORT":
             return True
+        if (
+            active_result.strategy == "IDLE"
+            and isinstance(getattr(active_result, "reason", None), str)
+            and "Ingen prisdata" in active_result.reason
+            and desired_result.strategy != "IDLE"
+        ):
+            return True
 
         cfg = self._config_entry.data
         min_soc = float(cfg.get("battery_min_soc", 10.0))

@@ -905,7 +905,15 @@ def test_battery_tracker_storage_load_failure_does_not_abort_startup():
         async def async_save(self, data):
             return None
 
+    class _EmptyStore:
+        async def async_load(self):
+            return None
+
+        async def async_save(self, data):
+            return None
+
     tracker._store = _BrokenStore()
+    tracker._backup_store = _EmptyStore()
 
     asyncio.run(tracker.async_load())
 

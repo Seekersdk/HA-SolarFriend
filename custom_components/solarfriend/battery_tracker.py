@@ -12,6 +12,7 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 2
 STORAGE_KEY = "solarfriend_battery_tracker"
+BACKUP_STORAGE_KEY = f"{STORAGE_KEY}_backup"
 _DRIFT_THRESHOLD = 0.10  # log warning if tracker drifts >10% from actual SOC
 
 
@@ -28,6 +29,7 @@ class BatteryTracker:
         self._legacy_entry_id = entry_id
         self._battery_cost_per_kwh = battery_cost_per_kwh
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._backup_store = Store(hass, STORAGE_VERSION, BACKUP_STORAGE_KEY)
         self.solar_kwh: float = 0.0
         self.grid_kwh: float = 0.0
         self.grid_avg_cost: float = 0.0
@@ -92,7 +94,15 @@ class BatteryTracker:
 
     async def async_load(self) -> None:
         """Load tracker state from HA storage."""
+        backup_store = getattr(self, "_backup_store", None)
+        if backup_store is None:
+            backup_store = Store(self._hass, STORAGE_VERSION, BACKUP_STORAGE_KEY)
+            self._backup_store = backup_store
         data = await self._async_safe_load(self._store, STORAGE_KEY)
+        loaded_from_backup = False
+        if not data:
+            data = await self._async_safe_load(backup_store, BACKUP_STORAGE_KEY)
+            loaded_from_backup = data is not None
         if not data and self._legacy_entry_id:
             legacy_store = Store(
                 self._hass,
@@ -109,9 +119,16 @@ class BatteryTracker:
                     self._legacy_entry_id,
                 )
                 await self._store.async_save(data)
+                await backup_store.async_save(data)
         if not data:
             _LOGGER.debug("BatteryTracker: no stored data, starting fresh")
             return
+        if loaded_from_backup:
+            _LOGGER.warning(
+                "BatteryTracker restored primary storage from backup %s",
+                BACKUP_STORAGE_KEY,
+            )
+            await self._store.async_save(data)
         self.solar_kwh = float(data.get("solar_kwh", 0.0))
         self.grid_kwh = float(data.get("grid_kwh", 0.0))
         self.grid_avg_cost = float(data.get("grid_avg_cost", 0.0))
@@ -153,23 +170,27 @@ class BatteryTracker:
 
     async def async_save(self) -> None:
         """Persist tracker state to HA storage."""
-        await self._store.async_save(
-            {
-                "solar_kwh": round(self.solar_kwh, 6),
-                "grid_kwh": round(self.grid_kwh, 6),
-                "grid_avg_cost": round(self.grid_avg_cost, 6),
-                "today_solar_direct_kwh": round(self.today_solar_direct_kwh, 6),
-                "today_solar_direct_saved_dkk": round(self.today_solar_direct_saved_dkk, 4),
-                "today_optimizer_saved_dkk": round(self.today_optimizer_saved_dkk, 4),
-                "total_solar_direct_saved_dkk": round(self.total_solar_direct_saved_dkk, 4),
-                "total_optimizer_saved_dkk": round(self.total_optimizer_saved_dkk, 4),
-                "today_battery_sell_kwh": round(self.today_battery_sell_kwh, 6),
-                "today_battery_sell_saved_dkk": round(self.today_battery_sell_saved_dkk, 4),
-                "total_battery_sell_saved_dkk": round(self.total_battery_sell_saved_dkk, 4),
-                "last_reset_date": self._last_reset_date,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        backup_store = getattr(self, "_backup_store", None)
+        if backup_store is None:
+            backup_store = Store(self._hass, STORAGE_VERSION, BACKUP_STORAGE_KEY)
+            self._backup_store = backup_store
+        payload = {
+            "solar_kwh": round(self.solar_kwh, 6),
+            "grid_kwh": round(self.grid_kwh, 6),
+            "grid_avg_cost": round(self.grid_avg_cost, 6),
+            "today_solar_direct_kwh": round(self.today_solar_direct_kwh, 6),
+            "today_solar_direct_saved_dkk": round(self.today_solar_direct_saved_dkk, 4),
+            "today_optimizer_saved_dkk": round(self.today_optimizer_saved_dkk, 4),
+            "total_solar_direct_saved_dkk": round(self.total_solar_direct_saved_dkk, 4),
+            "total_optimizer_saved_dkk": round(self.total_optimizer_saved_dkk, 4),
+            "today_battery_sell_kwh": round(self.today_battery_sell_kwh, 6),
+            "today_battery_sell_saved_dkk": round(self.today_battery_sell_saved_dkk, 4),
+            "total_battery_sell_saved_dkk": round(self.total_battery_sell_saved_dkk, 4),
+            "last_reset_date": self._last_reset_date,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+        await self._store.async_save(payload)
+        await backup_store.async_save(payload)
 
     def on_solar_charge(self, kwh: float) -> None:
         """Record kWh charged from solar surplus."""

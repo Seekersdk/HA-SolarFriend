@@ -333,3 +333,56 @@ def test_ev_solar_only_charging_blocks_sell_battery_even_when_enabled():
 
     assert overridden.strategy == "SAVE_SOLAR"
     assert "EV lader aktivt i solar_only" in overridden.reason
+
+
+def test_stale_no_price_idle_is_not_held_when_real_strategy_returns():
+    coordinator = _make_coordinator()
+    runtime = coordinator._ensure_strategy_runtime()
+    now = datetime(2026, 3, 28, 2, 0, 0)
+
+    active_result = OptimizeResult(
+        strategy="IDLE",
+        reason="Ingen prisdata tilgængelig",
+        target_soc=None,
+        charge_now=False,
+        cheapest_charge_hour=None,
+        night_charge_kwh=0.0,
+        morning_need_kwh=0.0,
+        day_deficit_kwh=0.0,
+        peak_need_kwh=0.0,
+        expected_saving_dkk=0.0,
+        weighted_battery_cost=0.3,
+        solar_fraction=0.5,
+        best_discharge_hours=[],
+        solar_sell=True,
+    )
+    desired_result = OptimizeResult(
+        strategy="USE_BATTERY",
+        reason="Bruger batteri i højværdi-time 02:00 til 1.24 kr",
+        target_soc=None,
+        charge_now=False,
+        cheapest_charge_hour=None,
+        night_charge_kwh=0.0,
+        morning_need_kwh=0.0,
+        day_deficit_kwh=0.0,
+        peak_need_kwh=0.0,
+        expected_saving_dkk=1.2,
+        weighted_battery_cost=0.3,
+        solar_fraction=0.5,
+        best_discharge_hours=["02:00"],
+        solar_sell=True,
+    )
+
+    selected, changed = runtime.select_result(
+        desired_result,
+        active_result=active_result,
+        now=now,
+        current_soc=18.0,
+        pv_power=0.0,
+        sunset=now.replace(hour=18),
+        solar_until_sunset_kwh=10.0,
+    )
+
+    assert changed is True
+    assert selected.strategy == "USE_BATTERY"
+    assert "Ingen prisdata" not in selected.reason
