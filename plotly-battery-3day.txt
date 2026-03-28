@@ -160,6 +160,31 @@ entities:
         return [active, active];
       })
 
+  - entity: sensor.solarfriend_battery_plan
+    name: Slot batteri tilladt
+    unit_of_measurement: slot
+    yaxis: y2
+    mode: lines
+    opacity: 0.55
+    line:
+      color: "#FACC15"
+      width: 4
+      dash: dot
+      shape: hv
+    hovertemplate: |
+      <b>Slot: Batteri tilladt ved lav sol</b><br>%{x|%d/%m %H:%M}<extra></extra>
+    x: |
+      $ex (meta.hourly_plan || []).flatMap(h => {
+        const start = new Date(h.hour);
+        const end = new Date(start.getTime() + 3600000);
+        return [start, end];
+      })
+    y: |
+      $ex (meta.hourly_plan || []).flatMap((h, idx) => {
+        const active = ((meta.hourly_allowed_discharge_w || [])[idx] || 0) > 0 ? 92 : null;
+        return [active, active];
+      })
+
   - entity: sensor.solarfriend_ev_ev_plan
     name: Slot EV sol
     unit_of_measurement: slot

@@ -495,6 +495,10 @@ class ForecastCorrectionModel:
             return True
 
         midpoint = datetime.combine(current_date, datetime.min.time()).replace(hour=hour, minute=30)
+        if sunrise.tzinfo is not None and midpoint.tzinfo is None:
+            midpoint = midpoint.replace(tzinfo=sunrise.tzinfo)
+        if sunset.tzinfo is not None and midpoint.tzinfo is None:
+            midpoint = midpoint.replace(tzinfo=sunset.tzinfo)
         return (sunrise + _SUN_BUFFER) <= midpoint <= (sunset - _SUN_BUFFER)
 
     @staticmethod
