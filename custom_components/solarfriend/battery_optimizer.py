@@ -203,11 +203,16 @@ class BatteryOptimizer:
         weighted_cost: float,
         hourly_forecast: list | None,
         reserved_solar_kwh: dict[datetime, float] | None = None,
+        raw_sell_prices: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Build a battery plan over the full known price horizon."""
         horizon = self._build_price_horizon(raw_prices, now)
         if not horizon:
             return []
+        sell_horizon = self._build_price_horizon(raw_sell_prices or raw_prices, now)
+        sell_price_by_start = {
+            item["start"]: float(item["price"]) for item in sell_horizon
+        }
 
         usable_capacity_kwh = (
             self.battery_capacity_kwh * (self.battery_max_soc - self.battery_min_soc) / 100.0
@@ -237,6 +242,7 @@ class BatteryOptimizer:
                     "solar_surplus_kwh": solar_surplus_kwh,
                     "charge_limit_kwh": self.charge_rate_kw,
                     "discharge_value": float(item["price"]) - weighted_cost,
+                    "sell_price": sell_price_by_start.get(start, float(item["price"])),
                     "grid_charge_planned_kwh": 0.0,
                     "discharge_planned_kwh": 0.0,
                 }
@@ -266,7 +272,6 @@ class BatteryOptimizer:
 
             stored_after_solar = min(capacity_units, stored_units + solar_surplus_units[slot_idx])
             max_discharge_units = min(
-                net_load_units[slot_idx],
                 charge_limit_units[slot_idx],
                 stored_after_solar,
             )
@@ -281,12 +286,15 @@ class BatteryOptimizer:
             for discharge_units in range(max_discharge_units + 1):
                 charge_range = range(0, max_charge_units + 1) if discharge_units == 0 else range(0, 1)
                 for charge_units in charge_range:
+                    discharge_to_load_units = min(net_load_units[slot_idx], discharge_units)
+                    export_units = max(0, discharge_units - discharge_to_load_units)
                     next_stored_units = stored_after_solar - discharge_units + charge_units
-                    grid_import_units = max(0, net_load_units[slot_idx] - discharge_units) + charge_units
+                    grid_import_units = max(0, net_load_units[slot_idx] - discharge_to_load_units) + charge_units
                     step_cost = (
                         (grid_import_units * quantum_kwh * slots[slot_idx]["price"])
                         + (charge_units * quantum_kwh * self.battery_cost_per_kwh)
                         + (discharge_units * quantum_kwh * weighted_cost)
+                        - (export_units * quantum_kwh * slots[slot_idx]["sell_price"])
                     )
                     future_cost, future_actions = _solve(slot_idx + 1, next_stored_units)
                     total_cost = step_cost + future_cost
@@ -310,14 +318,15 @@ class BatteryOptimizer:
             )
             stored_kwh += solar_charge_kwh
 
-            discharge_kwh = min(
-                slot["net_load_kwh"],
+            discharge_total_kwh = min(
                 discharge_units * quantum_kwh,
                 slot["charge_limit_kwh"],
                 stored_kwh,
             )
-            stored_kwh -= discharge_kwh
-            grid_import_kwh = max(0.0, slot["net_load_kwh"] - discharge_kwh)
+            discharge_to_load_kwh = min(slot["net_load_kwh"], discharge_total_kwh)
+            battery_export_kwh = max(0.0, discharge_total_kwh - discharge_to_load_kwh)
+            stored_kwh -= discharge_total_kwh
+            grid_import_kwh = max(0.0, slot["net_load_kwh"] - discharge_to_load_kwh)
 
             grid_charge_kwh = min(
                 charge_units * quantum_kwh,
@@ -336,9 +345,12 @@ class BatteryOptimizer:
                     "soc": round(max(self.battery_min_soc, min(self.battery_max_soc, soc_end_pct)), 1),
                     "solar_charge_w": round(solar_charge_kwh * 1000),
                     "grid_charge_w": round(grid_charge_kwh * 1000),
-                    "discharge_w": round(discharge_kwh * 1000),
+                    "discharge_w": round(discharge_total_kwh * 1000),
+                    "discharge_to_load_w": round(discharge_to_load_kwh * 1000),
+                    "battery_export_w": round(battery_export_kwh * 1000),
                     "grid_import_w": round(grid_import_kwh * 1000),
                     "price_dkk": round(slot["price"], 4),
+                    "sell_price_dkk": round(slot["sell_price"], 4),
                     "forecast_solar_w": round(slot["solar_kwh"] * 1000),
                     "forecast_load_w": round(slot["load_w"]),
                     "discharge_value": round(slot["discharge_value"], 4),
@@ -403,6 +415,7 @@ class BatteryOptimizer:
                 weighted_cost=weighted_cost,
                 hourly_forecast=hourly_forecast,
                 reserved_solar_kwh=reserved_solar_kwh,
+                raw_sell_prices=sell_prices,
             )
             return OptimizeResult(
                 strategy="ANTI_EXPORT",
@@ -440,6 +453,7 @@ class BatteryOptimizer:
             weighted_cost=weighted_cost,
             hourly_forecast=hourly_forecast,
             reserved_solar_kwh=reserved_solar_kwh,
+            raw_sell_prices=sell_prices,
         )
         current_slot = self._last_plan[0] if self._last_plan else None
 
@@ -479,7 +493,10 @@ class BatteryOptimizer:
         )
         expected_saving_dkk = round(
             sum(
-                (float(slot["discharge_w"]) / 1000.0) * max(0.0, float(slot["price_dkk"]) - weighted_cost)
+                (float(slot.get("discharge_to_load_w", slot["discharge_w"])) / 1000.0)
+                * max(0.0, float(slot["price_dkk"]) - weighted_cost)
+                + (float(slot.get("battery_export_w", 0.0)) / 1000.0)
+                * max(0.0, float(slot.get("sell_price_dkk", slot["price_dkk"])) - weighted_cost)
                 for slot in self._last_plan
             )
             - sum(
@@ -495,62 +512,6 @@ class BatteryOptimizer:
         if hourly_forecast:
             solar_remaining = get_forecast_for_period(hourly_forecast, now, sunset_time)
             solar_next_2h = get_forecast_for_period(hourly_forecast, now, now + timedelta(hours=2))
-
-        if sell_price > 0:
-            reserve_buffer_kwh = 0.5
-            cur = now.replace(minute=0, second=0, microsecond=0)
-            load_until_sunset_kwh = 0.0
-            while cur < sunset_time:
-                load_until_sunset_kwh += self._profile.get_predicted_watt(cur.hour, is_weekend) / 1000.0
-                cur += timedelta(hours=1)
-
-            if pv_power >= load_power:
-                load_until_solar_kwh = 0.0
-            elif hourly_forecast and solar_next_2h > 0:
-                next_2h_load_kwh = 0.0
-                cur = now.replace(minute=0, second=0, microsecond=0)
-                for _ in range(2):
-                    next_2h_load_kwh += self._profile.get_predicted_watt(cur.hour, is_weekend) / 1000.0
-                    cur += timedelta(hours=1)
-                load_until_solar_kwh = max(0.0, next_2h_load_kwh - solar_next_2h)
-            else:
-                solar_start = sunrise_time + timedelta(hours=1)
-                load_until_solar_kwh = 0.0
-                cur = now.replace(minute=0, second=0, microsecond=0)
-                while cur < solar_start:
-                    load_until_solar_kwh += self._profile.get_predicted_watt(cur.hour, is_weekend) / 1000.0
-                    cur += timedelta(hours=1)
-
-            future_recharge_kwh = max(0.0, solar_remaining - load_until_sunset_kwh)
-            sellable_kwh = min(
-                available_kwh,
-                max(0.0, available_kwh + future_recharge_kwh - load_until_solar_kwh - reserve_buffer_kwh),
-            )
-            net_gain = sellable_kwh * (sell_price - weighted_cost)
-            if (
-                sellable_kwh > 0.5
-                and future_recharge_kwh > 0.5
-                and net_gain > self.min_charge_saving
-                and sell_price > weighted_cost + self.min_charge_saving
-            ):
-                return OptimizeResult(
-                    strategy="SELL_BATTERY",
-                    reason=(
-                        f"Sælger {sellable_kwh:.1f} kWh til {sell_price:.2f} kr — "
-                        f"forventet genladning {future_recharge_kwh:.1f} kWh"
-                    ),
-                    target_soc=float(self.battery_min_soc),
-                    charge_now=False,
-                    cheapest_charge_hour=None,
-                    night_charge_kwh=0.0,
-                    morning_need_kwh=round(morning_need_kwh, 4),
-                    day_deficit_kwh=round(day_deficit_kwh, 4),
-                    peak_need_kwh=peak_need_kwh,
-                    expected_saving_dkk=round(net_gain, 4),
-                    weighted_battery_cost=weighted_cost,
-                    solar_fraction=solar_fraction,
-                    best_discharge_hours=best_discharge_hours,
-                )
 
         battery_has_headroom = available_kwh < usable_capacity_kwh * 0.9
         if pv_power - load_power > 50:
@@ -596,6 +557,44 @@ class BatteryOptimizer:
             target_soc = min(
                 self.battery_max_soc,
                 self.battery_min_soc + ((available_kwh + total_planned_charge_kwh) / self.battery_capacity_kwh * 100.0) + 5,
+            )
+
+        if current_slot and float(current_slot.get("battery_export_w", 0.0)) > 0:
+            future_recharge_slot = next(
+                (
+                    slot["hour_str"]
+                    for slot in self._last_plan[1:]
+                    if float(slot.get("solar_charge_w", 0.0)) > 0 or float(slot.get("grid_charge_w", 0.0)) > 0
+                ),
+                None,
+            )
+            future_recharge_kwh = round(
+                sum(
+                    (float(slot["solar_charge_w"]) + float(slot["grid_charge_w"])) / 1000.0
+                    for slot in self._last_plan[1:]
+                ),
+                4,
+            )
+            sell_now_kwh = round(float(current_slot["battery_export_w"]) / 1000.0, 4)
+            reason = f"Sælger {sell_now_kwh:.1f} kWh nu til {float(current_slot['sell_price_dkk']):.2f} kr"
+            if future_recharge_slot:
+                reason += f" — næste genladning {future_recharge_slot}"
+            if future_recharge_kwh > 0:
+                reason += f", forventet genladning {future_recharge_kwh:.1f} kWh"
+            return OptimizeResult(
+                strategy="SELL_BATTERY",
+                reason=reason,
+                target_soc=float(self.battery_min_soc),
+                charge_now=False,
+                cheapest_charge_hour=cheapest_charge_hour,
+                night_charge_kwh=total_planned_charge_kwh,
+                morning_need_kwh=round(morning_need_kwh, 4),
+                day_deficit_kwh=round(day_deficit_kwh, 4),
+                peak_need_kwh=peak_need_kwh,
+                expected_saving_dkk=expected_saving_dkk,
+                weighted_battery_cost=weighted_cost,
+                solar_fraction=solar_fraction,
+                best_discharge_hours=best_discharge_hours,
             )
 
         if total_planned_charge_kwh > 0 and (

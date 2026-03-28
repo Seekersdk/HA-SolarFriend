@@ -320,6 +320,30 @@ def test_days_collected_ignores_sparse_buckets():
     assert profile.days_collected == 3
 
 
+def test_get_predicted_watt_falls_back_to_weekday_when_weekend_is_sparse():
+    """Weekend predictions should use weekday data when weekend bucket is too sparse."""
+    profile = ConsumptionProfile()
+    profile._profiles["weekday"][20]["samples"] = 8
+    profile._profiles["weekday"][20]["avg_watt"] = 1450.0
+    profile._profiles["weekend"][20]["samples"] = 1
+    profile._profiles["weekend"][20]["avg_watt"] = 0.0
+
+    assert profile.get_predicted_watt(20, is_weekend=True) == 1450.0
+
+
+def test_debug_snapshot_reports_fallback_hours():
+    """Diagnostics should expose which hours are using fallback day-type data."""
+    profile = ConsumptionProfile()
+    profile._profiles["weekday"][0]["samples"] = 6
+    profile._profiles["weekday"][0]["avg_watt"] = 900.0
+    profile._profiles["weekend"][0]["samples"] = 1
+    profile._profiles["weekend"][0]["avg_watt"] = 0.0
+
+    snapshot = profile.build_debug_snapshot()
+
+    assert 0 in snapshot["weekend"]["fallback_hours"]
+
+
 def test_bootstrap_power_history_integrates_time_weighted_load():
     """Power history should be integrated over time, not averaged as raw points."""
     states = [

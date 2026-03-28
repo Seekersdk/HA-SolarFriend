@@ -23,6 +23,7 @@ _SEED_MATCH_ABS_W = 50.0
 _SEED_MATCH_REL = 0.05
 _SEED_HISTORY_WEIGHT = 3.0
 _SEED_MIN_DIRECT_SAMPLES = 3.0
+_PROFILE_FALLBACK_MIN_SAMPLES = 3.0
 
 
 def _to_float(value: Any) -> float | None:
@@ -88,6 +89,20 @@ class ConsumptionProfile:
     def _bucket_key(dt: datetime) -> tuple[str, int]:
         """Map a timestamp to profile bucket."""
         return ("weekday" if dt.weekday() < 5 else "weekend", dt.hour)
+
+    def _resolve_slot(self, hour: int, is_weekend: bool) -> tuple[str, dict[str, float]]:
+        """Return the best available slot, falling back to the opposite day type if needed."""
+        profile_key = "weekend" if is_weekend else "weekday"
+        slot = self._profiles[profile_key][hour]
+        if slot["samples"] >= _PROFILE_FALLBACK_MIN_SAMPLES:
+            return profile_key, slot
+
+        fallback_key = "weekday" if is_weekend else "weekend"
+        fallback_slot = self._profiles[fallback_key][hour]
+        if fallback_slot["samples"] >= _PROFILE_FALLBACK_MIN_SAMPLES:
+            return fallback_key, fallback_slot
+
+        return profile_key, slot
 
     @staticmethod
     def _distribute_energy_to_buckets(
@@ -462,8 +477,7 @@ class ConsumptionProfile:
 
     def get_predicted_watt(self, hour: int, is_weekend: bool) -> float:
         """Return predicted load for a given hour and day-type."""
-        profile_key = "weekend" if is_weekend else "weekday"
-        slot = self._profiles[profile_key][hour]
+        _, slot = self._resolve_slot(hour, is_weekend)
         if slot["samples"] < 3:
             return DEFAULT_WATT
         return slot["avg_watt"]
@@ -497,6 +511,11 @@ class ConsumptionProfile:
                 "populated_hours": len(populated),
                 "median_samples": median_samples,
                 "days_estimate": int(median_samples // 4) if len(populated) >= 6 else 0,
+                "fallback_hours": [
+                    hour
+                    for hour in range(24)
+                    if self._resolve_slot(hour, profile_key == "weekend")[0] != profile_key
+                ],
                 "samples_per_hour": {
                     str(hour): float(profile[hour]["samples"])
                     for hour in range(24)

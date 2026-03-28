@@ -72,8 +72,11 @@ def _battery_plan_attrs(d: "SolarFriendData", cfg: dict) -> dict:
         "hourly_solar_charge_w": [slot["solar_charge_w"] for slot in plan],
         "hourly_grid_charge_w": [slot["grid_charge_w"] for slot in plan],
         "hourly_discharge_w": [slot["discharge_w"] for slot in plan],
+        "hourly_discharge_to_load_w": [slot.get("discharge_to_load_w", slot["discharge_w"]) for slot in plan],
+        "hourly_battery_export_w": [slot.get("battery_export_w", 0.0) for slot in plan],
         "hourly_grid_import_w": [slot["grid_import_w"] for slot in plan],
         "hourly_price": [slot["price_dkk"] for slot in plan],
+        "hourly_sell_price": [slot.get("sell_price_dkk", slot["price_dkk"]) for slot in plan],
     }
 
 
