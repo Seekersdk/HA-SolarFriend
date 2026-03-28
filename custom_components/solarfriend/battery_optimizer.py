@@ -660,6 +660,13 @@ class BatteryOptimizer:
             )
 
         if current_slot and float(current_slot.get("battery_export_w", 0.0)) > 0:
+            planned_self_use_kwh = round(
+                sum(
+                    float(slot.get("discharge_to_load_w", slot["discharge_w"])) / 1000.0
+                    for slot in self._last_plan
+                ),
+                4,
+            )
             future_recharge_slot = next(
                 (
                     slot["hour_str"]
@@ -676,6 +683,34 @@ class BatteryOptimizer:
                 4,
             )
             sell_now_kwh = round(float(current_slot["battery_export_w"]) / 1000.0, 4)
+            current_self_use_kwh = round(
+                float(current_slot.get("discharge_to_load_w", current_slot["discharge_w"])) / 1000.0,
+                4,
+            )
+            reserved_for_self_use_kwh = max(0.0, planned_self_use_kwh - future_recharge_kwh)
+            exportable_surplus_kwh = max(0.0, available_kwh - reserved_for_self_use_kwh)
+            if exportable_surplus_kwh + 1e-6 < sell_now_kwh or current_self_use_kwh > 0.1:
+                reserve_reason = (
+                    f"Reserverer batteri til forventet egetforbrug ({reserved_for_self_use_kwh:.1f} kWh)"
+                )
+                if current_self_use_kwh > 0.1:
+                    reserve_reason += f" — forventet husforbrug i denne time {current_self_use_kwh:.1f} kWh"
+                return OptimizeResult(
+                    strategy="USE_BATTERY",
+                    reason=reserve_reason,
+                    target_soc=round(target_soc, 1) if target_soc is not None else None,
+                    charge_now=False,
+                    cheapest_charge_hour=cheapest_charge_hour,
+                    night_charge_kwh=total_planned_charge_kwh,
+                    morning_need_kwh=round(morning_need_kwh, 4),
+                    day_deficit_kwh=round(day_deficit_kwh, 4),
+                    peak_need_kwh=peak_need_kwh,
+                    expected_saving_dkk=expected_saving_dkk,
+                    weighted_battery_cost=weighted_cost,
+                    solar_fraction=solar_fraction,
+                    best_discharge_hours=best_discharge_hours,
+                    allowed_discharge_slots=allowed_discharge_slots,
+                )
             reason = f"Sælger {sell_now_kwh:.1f} kWh nu til {float(current_slot['sell_price_dkk']):.2f} kr"
             if future_recharge_slot:
                 reason += f" — næste genladning {future_recharge_slot}"
