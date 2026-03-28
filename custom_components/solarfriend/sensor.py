@@ -441,9 +441,13 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         state_class=None,
         icon="mdi:brain",
         value_fn=lambda d, _: (
-            "Anti-eksport (negativ pris)"
-            if _plan_metrics_result(d) and _plan_metrics_result(d).strategy == "ANTI_EXPORT"
+            "Negativ import (køb alt fra nettet)"
+            if _plan_metrics_result(d) and _plan_metrics_result(d).strategy == "NEGATIVE_IMPORT"
+            else (
+                "Anti-eksport (negativ pris)"
+                if _plan_metrics_result(d) and _plan_metrics_result(d).strategy == "ANTI_EXPORT"
             else (_plan_metrics_result(d).strategy if _plan_metrics_result(d) else "IDLE")
+            )
         ),
         extra_attrs_fn=lambda d, _: (
             {

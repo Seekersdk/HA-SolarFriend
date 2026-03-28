@@ -411,6 +411,33 @@ class BatteryOptimizer:
             else current_price
         ) or current_price
 
+        if current_price < 0:
+            self._last_plan = self._build_horizon_plan(
+                now=now,
+                current_soc=current_soc,
+                raw_prices=raw_prices,
+                weighted_cost=weighted_cost,
+                hourly_forecast=hourly_forecast,
+                reserved_solar_kwh=reserved_solar_kwh,
+                raw_sell_prices=sell_prices,
+            )
+            return OptimizeResult(
+                strategy="NEGATIVE_IMPORT",
+                reason=f"Negativ købspris ({current_price:.4f} kr/kWh) — køber alt fra nettet",
+                target_soc=None,
+                charge_now=False,
+                cheapest_charge_hour=None,
+                night_charge_kwh=0.0,
+                morning_need_kwh=0.0,
+                day_deficit_kwh=0.0,
+                peak_need_kwh=0.0,
+                expected_saving_dkk=0.0,
+                weighted_battery_cost=weighted_cost,
+                solar_fraction=solar_fraction,
+                best_discharge_hours=[],
+                solar_sell=False,
+            )
+
         if sell_price <= 0 and sell_prices:
             self._last_plan = self._build_horizon_plan(
                 now=now,
@@ -737,6 +764,19 @@ if __name__ == "__main__":
     _opt = BatteryOptimizer(_MockEntry(_CONFIG), _MockTracker(), _MockProfile())
 
     # --- Scenario 1: Dag, sol-overskud → SAVE_SOLAR ---
+    _NEGATIVE_IMPORT_PRICES = [
+        {"hour": h, "price": (-0.25 if h == 12 else (1.38 if 7 <= h < 22 else 0.38))}
+        for h in range(24)
+    ]
+    r0 = _opt.optimize(
+        now=_dt(2026, 3, 22, 12, 0, 0),
+        pv_power=5000, load_power=800, current_soc=60,
+        raw_prices=_NEGATIVE_IMPORT_PRICES, forecast_today_kwh=15.0, forecast_tomorrow_kwh=15.0,
+        sunrise_time=_SUNRISE, sunset_time=_SUNSET, is_weekend=False,
+    )
+    assert r0.strategy == "NEGATIVE_IMPORT", f"Scenario 0 fejlede: {r0.strategy}"
+    print(f"Scenario 0 OK  strategy={r0.strategy!r:16}  reason='{r0.reason}'")
+
     r1 = _opt.optimize(
         now=_dt(2026, 3, 22, 12, 0, 0),
         pv_power=5000, load_power=800, current_soc=60,

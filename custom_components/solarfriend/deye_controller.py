@@ -168,6 +168,23 @@ class DeyeController(InverterController):
                 self._energy_priority: "Load first",
                 self._limit_control_mode: "Zero export to CT",
             }
+        if result.strategy == "NEGATIVE_IMPORT":
+            if self._max_battery_discharge_current:
+                return {
+                    self._grid_charge: "off",
+                    self._time_of_use: "off",
+                    self._tp1_enable: "off",
+                    self._energy_priority: "Load first",
+                    self._limit_control_mode: "Zero export to load",
+                    self._max_battery_discharge_current: 0.0,
+                }
+            return {
+                self._grid_charge: "off",
+                self._time_of_use: "off",
+                self._tp1_enable: "off",
+                self._energy_priority: "Load first",
+                self._limit_control_mode: "Zero export to load",
+            }
         if result.strategy in {"IDLE", "SAVE_SOLAR", "ANTI_EXPORT"}:
             return self._with_default_discharge_limit({
                 self._grid_charge: "off",
@@ -218,6 +235,9 @@ class DeyeController(InverterController):
         if result.strategy == "ANTI_EXPORT":
             await self._set_solar_sell(False)
             await self._apply_idle()
+        elif result.strategy == "NEGATIVE_IMPORT":
+            await self._set_solar_sell(False)
+            await self._apply_negative_import()
         elif result.strategy == "CHARGE_NIGHT":
             await self._set_solar_sell(True)
             await self._apply_charge_night(result)
@@ -335,6 +355,15 @@ class DeyeController(InverterController):
         )
         await self._set_select(self._energy_priority, "Load first")
         await self._set_select(self._limit_control_mode, "Zero export to CT")
+
+    async def _apply_negative_import(self) -> None:
+        """Buy house energy from grid and block battery discharge."""
+        await self._set_switch(self._grid_charge, False)
+        await self._set_switch(self._time_of_use, False)
+        await self._set_switch(self._tp1_enable, False)
+        await self._set_number(self._max_battery_discharge_current, 0)
+        await self._set_select(self._energy_priority, "Load first")
+        await self._set_select(self._limit_control_mode, "Zero export to load")
 
     async def _apply_ev_hold_battery(self, result: OptimizeResult) -> None:
         """Block battery discharge so EV load is covered by PV/grid instead."""
