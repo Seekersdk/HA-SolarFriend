@@ -180,6 +180,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._pending_strategy: str | None = None
         self._pending_strategy_count: int = 0
         self._last_plan_deviation_key: str | None = None
+        self._startup_at: datetime = ha_dt.now()
+        self._startup_price_recovery_optimize_done: bool = False
         self._shadow_log_enabled: bool = bool(entry.data.get("shadow_log_enabled", False))
         self._shadow_logger = ShadowLogger(
             entry=entry,
@@ -608,6 +610,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         # Last-resort fallback when no actual price snapshot is available
         if not raw_prices:
+            startup_grace_active = (now - self._startup_at) < timedelta(minutes=2)
+            if startup_grace_active:
+                _LOGGER.info(
+                    "BatteryOptimizer: price data not available during startup grace — skipping optimize (%s)",
+                    reason,
+                )
+                return
             raw_prices = [{"hour": h, "price": p} for h, p in self._night_prices.items()]
             if self.data.price > 0:
                 raw_prices.append({"hour": now.hour, "price": self.data.price})
@@ -616,6 +625,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         forecast_data = self.data.forecast_data
 
         if forecast_data is None:
+            startup_grace_active = (now - self._startup_at) < timedelta(minutes=2)
+            if startup_grace_active:
+                _LOGGER.info(
+                    "BatteryOptimizer: forecast data not available during startup grace — skipping optimize (%s)",
+                    reason,
+                )
+                return
             _LOGGER.warning("BatteryOptimizer: forecast data not available — using zeros")
             forecast_today    = 0.0
             forecast_tomorrow = 0.0
@@ -1581,6 +1597,27 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             self._last_optimize_dt is None
             or (now - self._last_optimize_dt) >= timedelta(hours=1)
         )
+        startup_grace_active = (now - self._startup_at) < timedelta(minutes=2)
+        price_recovered_in_startup = (
+            startup_grace_active
+            and not self._startup_price_recovery_optimize_done
+            and data.price_data is not None
+            and data.price_data.current_price is not None
+            and (prev_data is None or prev_data.price_data is None)
+        )
+        if price_recovered_in_startup:
+            self._startup_price_recovery_optimize_done = True
+            self.data = data  # type: ignore[assignment]
+            await self._trigger_optimize(
+                "startup-price-recovered",
+                notify=False,
+                force=True,
+            )
+            data.optimize_result = self.data.optimize_result if self.data else data.optimize_result
+            data.plan_optimize_result = (
+                self.data.plan_optimize_result if self.data else data.plan_optimize_result
+            )
+
         if should_run_deviation or should_run_hourly:
             # Temporarily expose the new data so _trigger_optimize can read it
             self.data = data  # type: ignore[assignment]

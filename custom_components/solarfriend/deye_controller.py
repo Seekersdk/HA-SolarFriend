@@ -64,6 +64,7 @@ class DeyeController(InverterController):
         self._battery_min_soc = float(data.get("battery_min_soc", 10.0))
 
         self._last_signature: _CommandSignature | None = None
+        self._number_service_missing_warned: bool = False
 
     @property
     def is_configured(self) -> bool:
@@ -419,6 +420,14 @@ class DeyeController(InverterController):
     async def _set_number(self, entity_id: str | None, value: float) -> None:
         if not entity_id:
             return
+        if not self.hass.services.has_service("number", "set_value"):
+            if not self._number_service_missing_warned:
+                _LOGGER.warning(
+                    "DeyeController: number.set_value service not available yet — skipping number write for now"
+                )
+                self._number_service_missing_warned = True
+            return
+        self._number_service_missing_warned = False
         try:
             await self.hass.services.async_call(
                 "number",
