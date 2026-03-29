@@ -13,6 +13,46 @@ from typing import Any
 from .forecast_adapter import get_forecast_for_period
 
 
+def _merge_solar_profile_comparison(
+    rows_by_variant: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Merge per-resolution Track-2 comparison rows into one graph-friendly series."""
+    merged: dict[str, dict[str, Any]] = {}
+    for variant_key, rows in rows_by_variant.items():
+        for row in rows:
+            period_start = row.get("period_start")
+            if not period_start:
+                continue
+            base = merged.setdefault(
+                period_start,
+                {
+                    "period_start": period_start,
+                    "solcast_kwh": row.get("solcast_kwh"),
+                    "faktisk_kwh": row.get("faktisk_kwh"),
+                    "empirisk_kwh": row.get("empirisk_kwh"),
+                    "elevation": row.get("elevation"),
+                },
+            )
+            if base.get("solcast_kwh") is None:
+                base["solcast_kwh"] = row.get("solcast_kwh")
+            if base.get("faktisk_kwh") is None:
+                base["faktisk_kwh"] = row.get("faktisk_kwh")
+            if base.get("empirisk_kwh") is None:
+                base["empirisk_kwh"] = row.get("empirisk_kwh")
+            if base.get("elevation") is None:
+                base["elevation"] = row.get("elevation")
+
+            key_name = f"beregnet_{variant_key}_kwh"
+            conf_name = f"beregnet_{variant_key}_confidence"
+            base[key_name] = row.get("beregnet_kwh")
+            base[conf_name] = row.get("beregnet_confidence")
+            if variant_key == "medium":
+                base["beregnet_kwh"] = row.get("beregnet_kwh")
+                base["beregnet_confidence"] = row.get("beregnet_confidence")
+
+    return [merged[key] for key in sorted(merged)]
+
+
 class SnapshotBuilder:
     """Populate snapshot fields from trackers/models/profile state."""
 
@@ -210,39 +250,68 @@ class SnapshotBuilder:
         data.advanced_consumption_model_recent_daily_totals = snapshot.recent_daily_totals
         data.advanced_consumption_model_last_weather = snapshot.last_weather_snapshot
 
-    def apply_solar_installation_profile(
+    def apply_solar_installation_profiles(
         self,
         *,
         data: Any,
         now: datetime,
-        profile: Any | None,
+        profiles: dict[str, Any] | None,
         latitude: float,
         longitude: float,
         raw_hourly_forecast: list[dict],
         empirical_hourly_forecast: list[dict] | None = None,
     ) -> None:
-        """Project solar installation profile (Track 2) into the snapshot."""
-        if profile is None:
+        """Project one or more Track-2 profiles into the snapshot."""
+        if not profiles:
             return
-        snapshot = profile.build_snapshot(
-            now=now,
-            latitude=latitude,
-            longitude=longitude,
-            raw_hourly_forecast=raw_hourly_forecast,
-            empirical_hourly_forecast=empirical_hourly_forecast or [],
+        snapshots: dict[str, Any] = {}
+        for key, profile in profiles.items():
+            if profile is None:
+                continue
+            snapshots[key] = profile.build_snapshot(
+                now=now,
+                latitude=latitude,
+                longitude=longitude,
+                raw_hourly_forecast=raw_hourly_forecast,
+                empirical_hourly_forecast=empirical_hourly_forecast or [],
+            )
+        if not snapshots:
+            return
+
+        medium_snapshot = snapshots.get("medium") or next(iter(snapshots.values()))
+        data.solar_profile_state = medium_snapshot.state
+        data.solar_profile_populated_cells = medium_snapshot.populated_cells
+        data.solar_profile_confident_cells = medium_snapshot.confident_cells
+        data.solar_profile_astronomical_coverage_pct = medium_snapshot.astronomical_coverage_pct
+        data.solar_profile_annual_paths_total = medium_snapshot.annual_paths_total
+        data.solar_profile_annual_paths_covered = medium_snapshot.annual_paths_covered
+        data.solar_profile_annual_paths_missing = medium_snapshot.annual_paths_missing
+        data.solar_profile_clear_sky_observations = medium_snapshot.clear_sky_observations
+        data.solar_profile_estimated_hours_to_ready = medium_snapshot.estimated_hours_to_ready
+        data.solar_profile_response_surface = medium_snapshot.response_surface
+        data.solar_profile_variants = {
+            key: {
+                "resolution_key": snapshot.resolution_key,
+                "resolution_label": snapshot.resolution_label,
+                "state": snapshot.state,
+                "populated_cells": snapshot.populated_cells,
+                "confident_cells": snapshot.confident_cells,
+                "astronomical_coverage_pct": snapshot.astronomical_coverage_pct,
+                "annual_paths_total": snapshot.annual_paths_total,
+                "annual_paths_covered": snapshot.annual_paths_covered,
+                "annual_paths_missing": snapshot.annual_paths_missing,
+                "clear_sky_observations": snapshot.clear_sky_observations,
+                "estimated_hours_to_ready": snapshot.estimated_hours_to_ready,
+                "response_surface": snapshot.response_surface,
+            }
+            for key, snapshot in snapshots.items()
+        }
+        data.solar_profile_comparison_today = _merge_solar_profile_comparison(
+            {key: snapshot.comparison_today for key, snapshot in snapshots.items()}
         )
-        data.solar_profile_state = snapshot.state
-        data.solar_profile_populated_cells = snapshot.populated_cells
-        data.solar_profile_confident_cells = snapshot.confident_cells
-        data.solar_profile_astronomical_coverage_pct = snapshot.astronomical_coverage_pct
-        data.solar_profile_annual_paths_total = snapshot.annual_paths_total
-        data.solar_profile_annual_paths_covered = snapshot.annual_paths_covered
-        data.solar_profile_annual_paths_missing = snapshot.annual_paths_missing
-        data.solar_profile_clear_sky_observations = snapshot.clear_sky_observations
-        data.solar_profile_estimated_hours_to_ready = snapshot.estimated_hours_to_ready
-        data.solar_profile_response_surface = snapshot.response_surface
-        data.solar_profile_comparison_today = snapshot.comparison_today
-        data.solar_profile_comparison_tomorrow = snapshot.comparison_tomorrow
+        data.solar_profile_comparison_tomorrow = _merge_solar_profile_comparison(
+            {key: snapshot.comparison_tomorrow for key, snapshot in snapshots.items()}
+        )
 
     def apply_profile_debug(self, *, data: Any, profile: Any) -> None:
         """Project profile confidence/debug fields into the snapshot."""

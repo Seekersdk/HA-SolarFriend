@@ -39,3 +39,6 @@ custom_components/hacs/
 custom_components/kia_uvo/
 .claude/ 
 dev/
+
+# Local dashboards
+dashboards/

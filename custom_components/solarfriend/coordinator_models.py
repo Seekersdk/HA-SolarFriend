@@ -141,6 +141,7 @@ class SolarFriendData:
     solar_profile_clear_sky_observations: int = 0
     solar_profile_estimated_hours_to_ready: float = 0.0
     solar_profile_response_surface: dict[str, float] = field(default_factory=dict)
+    solar_profile_variants: dict[str, dict[str, Any]] = field(default_factory=dict)
     solar_profile_comparison_today: list[dict[str, Any]] = field(default_factory=list)
     solar_profile_comparison_tomorrow: list[dict[str, Any]] = field(default_factory=list)
 

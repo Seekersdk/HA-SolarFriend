@@ -15,6 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, UnitOfEnergy, UnitOfPower, PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -33,6 +34,7 @@ UNIT_KR = "kr"
 class SolarFriendSensorDescription(SensorEntityDescription):
     """Extends SensorEntityDescription with a value accessor and optional attributes."""
 
+    entity_registry_visible_default: bool = True
     value_fn: Callable[[SolarFriendData, dict[str, Any]], float | str | None] = (
         lambda d, c: None
     )
@@ -138,8 +140,32 @@ def _solar_installation_profile_attrs(d: "SolarFriendData", cfg: dict) -> dict:
         "clear_sky_observations": d.solar_profile_clear_sky_observations,
         "estimated_hours_to_ready": d.solar_profile_estimated_hours_to_ready,
         "response_surface": d.solar_profile_response_surface,
+        "variants": d.solar_profile_variants,
         "comparison_today": d.solar_profile_comparison_today,
         "comparison_tomorrow": d.solar_profile_comparison_tomorrow,
+    }
+
+
+def _solar_profile_variant(d: "SolarFriendData", key: str) -> dict[str, Any]:
+    return d.solar_profile_variants.get(key, {})
+
+
+def _solar_installation_profile_variant_attrs(
+    d: "SolarFriendData", _cfg: dict, key: str
+) -> dict[str, Any]:
+    variant = _solar_profile_variant(d, key)
+    return {
+        "resolution_key": key,
+        "resolution_label": variant.get("resolution_label", key.title()),
+        "populated_cells": variant.get("populated_cells", 0),
+        "confident_cells": variant.get("confident_cells", 0),
+        "astronomical_coverage_pct": variant.get("astronomical_coverage_pct", 0.0),
+        "annual_paths_total": variant.get("annual_paths_total", 0),
+        "annual_paths_covered": variant.get("annual_paths_covered", 0),
+        "annual_paths_missing": variant.get("annual_paths_missing", 0),
+        "clear_sky_observations": variant.get("clear_sky_observations", 0),
+        "estimated_hours_to_ready": variant.get("estimated_hours_to_ready", 0.0),
+        "response_surface": variant.get("response_surface", {}),
     }
 
 
@@ -741,6 +767,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=None,
         device_class=None,
         state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:solar-panel",
         value_fn=lambda d, _: d.solar_profile_state,
         extra_attrs_fn=lambda d, cfg: _solar_installation_profile_attrs(d, cfg),
@@ -751,6 +779,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement="h",
         device_class=None,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:timer-sand",
         value_fn=lambda d, _: round(d.solar_profile_estimated_hours_to_ready, 1),
     ),
@@ -760,8 +790,112 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement="paths",
         device_class=None,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:vector-polyline-minus",
         value_fn=lambda d, _: d.solar_profile_annual_paths_missing,
+    ),
+    SolarFriendSensorDescription(
+        key="solar_installation_profile_fast",
+        name="Solar Installation Profile Fast",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:solar-panel-large",
+        value_fn=lambda d, _: _solar_profile_variant(d, "fast").get("state", "inactive"),
+        extra_attrs_fn=lambda d, cfg: _solar_installation_profile_variant_attrs(d, cfg, "fast"),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_hours_to_ready_fast",
+        name="Solar Profile Hours To Ready Fast",
+        native_unit_of_measurement="h",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:timer-sand",
+        value_fn=lambda d, _: round(float(_solar_profile_variant(d, "fast").get("estimated_hours_to_ready", 0.0)), 1),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_missing_annual_paths_fast",
+        name="Solar Profile Missing Annual Paths Fast",
+        native_unit_of_measurement="paths",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:vector-polyline-minus",
+        value_fn=lambda d, _: int(_solar_profile_variant(d, "fast").get("annual_paths_missing", 0)),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_installation_profile_medium",
+        name="Solar Installation Profile Medium",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:solar-panel-large",
+        value_fn=lambda d, _: _solar_profile_variant(d, "medium").get("state", d.solar_profile_state),
+        extra_attrs_fn=lambda d, cfg: _solar_installation_profile_variant_attrs(d, cfg, "medium"),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_hours_to_ready_medium",
+        name="Solar Profile Hours To Ready Medium",
+        native_unit_of_measurement="h",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:timer-sand",
+        value_fn=lambda d, _: round(float(_solar_profile_variant(d, "medium").get("estimated_hours_to_ready", d.solar_profile_estimated_hours_to_ready)), 1),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_missing_annual_paths_medium",
+        name="Solar Profile Missing Annual Paths Medium",
+        native_unit_of_measurement="paths",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:vector-polyline-minus",
+        value_fn=lambda d, _: int(_solar_profile_variant(d, "medium").get("annual_paths_missing", d.solar_profile_annual_paths_missing)),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_installation_profile_fine",
+        name="Solar Installation Profile Fine",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:solar-panel-large",
+        value_fn=lambda d, _: _solar_profile_variant(d, "fine").get("state", "inactive"),
+        extra_attrs_fn=lambda d, cfg: _solar_installation_profile_variant_attrs(d, cfg, "fine"),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_hours_to_ready_fine",
+        name="Solar Profile Hours To Ready Fine",
+        native_unit_of_measurement="h",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:timer-sand",
+        value_fn=lambda d, _: round(float(_solar_profile_variant(d, "fine").get("estimated_hours_to_ready", 0.0)), 1),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_missing_annual_paths_fine",
+        name="Solar Profile Missing Annual Paths Fine",
+        native_unit_of_measurement="paths",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:vector-polyline-minus",
+        value_fn=lambda d, _: int(_solar_profile_variant(d, "fine").get("annual_paths_missing", 0)),
     ),
     SolarFriendSensorDescription(
         key="forecast_correction_model",
@@ -769,6 +903,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=None,
         device_class=None,
         state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:tune-variant",
         value_fn=lambda d, _: d.forecast_correction_model_state,
         extra_attrs_fn=lambda d, cfg: _forecast_correction_model_attrs(d, cfg),
@@ -779,6 +915,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=None,
         device_class=None,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:multiplication",
         value_fn=lambda d, _: round(d.forecast_correction_current_total_factor, 4),
     ),
@@ -788,6 +926,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=None,
         device_class=None,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:solar-power-variant",
         value_fn=lambda d, _: round(d.forecast_correction_current_geometry_factor, 4),
     ),
@@ -797,6 +937,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=None,
         device_class=None,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:thermometer",
         value_fn=lambda d, _: round(d.forecast_correction_current_temperature_factor, 4),
     ),
@@ -894,6 +1036,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=None,
         device_class=None,
         state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:chart-timeline-variant",
         value_fn=lambda d, _: d.advanced_consumption_model_state,
     ),
@@ -903,6 +1047,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement="records",
         device_class=None,
         state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:database",
         value_fn=lambda d, _: d.advanced_consumption_model_records,
     ),
@@ -912,6 +1058,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement="days",
         device_class=None,
         state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:calendar-range",
         value_fn=lambda d, _: d.advanced_consumption_model_tracked_days,
     ),
@@ -921,6 +1069,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:chart-bell-curve-cumulative",
         value_fn=lambda d, _: d.advanced_consumption_model_current_hour_prediction_w,
     ),
@@ -930,6 +1080,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:gauge",
         value_fn=lambda d, _: d.advanced_consumption_model_current_hour_actual_w,
     ),
@@ -939,6 +1091,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:clock-check-outline",
         value_fn=lambda d, _: d.advanced_consumption_model_last_hour_actual_w,
     ),
@@ -948,6 +1102,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:clock-outline",
         value_fn=lambda d, _: d.advanced_consumption_model_last_hour_prediction_w,
     ),
@@ -957,6 +1113,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:chart-line-variant",
         value_fn=lambda d, _: d.advanced_consumption_model_last_hour_error_w,
     ),
@@ -966,6 +1124,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:target",
         value_fn=lambda d, _: d.advanced_consumption_model_today_mae_w,
     ),
@@ -975,6 +1135,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:calendar-week",
         value_fn=lambda d, _: d.advanced_consumption_model_7d_mae_w,
     ),
@@ -984,6 +1146,8 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
         icon="mdi:chart-box-outline",
         value_fn=lambda d, _: (
             d.advanced_consumption_model_current_hour_actual_w
@@ -1122,6 +1286,9 @@ class SolarFriendSensor(CoordinatorEntity[SolarFriendCoordinator], SensorEntity)
             name=entry.data.get(CONF_NAME, "SolarFriend"),
             manufacturer="SolarFriend",
             model="Solar Energy Manager",
+        )
+        self._attr_entity_registry_visible_default = (
+            description.entity_registry_visible_default
         )
 
     @property

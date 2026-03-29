@@ -41,7 +41,6 @@ _MIN_FACTOR = 0.10
 _MAX_FACTOR = 2.00
 _ALPHA_CAP = 20                 # EMA cap — factor stabilises after ~20 clear-sky observations per cell
 _MIN_SAMPLES_CONFIDENT = 5      # Samples needed before a cell is used for projection
-_MIN_CELLS_READY = 10           # Confident cells needed before Track 2 activates
 _IDW_ELEVATION_WEIGHT = 1.0     # Relative weight of elevation distance in IDW
 _IDW_AZIMUTH_WEIGHT = 0.4       # Azimuth matters less — panel tilt affects elevation response more
 _BLEND_SIGMA = 25.0             # Distance scale for local confidence in solar-path space
@@ -58,10 +57,23 @@ class ResponseCell:
     avg_abs_error_kwh: float = 0.0
 
 
+@dataclass(frozen=True)
+class ProfileResolution:
+    """Bucket resolution and readiness target for one Track-2 variant."""
+
+    key: str
+    label: str
+    elevation_step_deg: int
+    azimuth_step_deg: int
+    min_cells_ready: int
+
+
 @dataclass
 class ProfileSnapshot:
     """Diagnostics + comparison data exposed via sensors."""
 
+    resolution_key: str = "medium"
+    resolution_label: str = "Medium"
     state: str = "inactive"             # inactive | learning | ready
     populated_cells: int = 0
     confident_cells: int = 0
@@ -77,6 +89,31 @@ class ProfileSnapshot:
     comparison_tomorrow: list[dict[str, Any]] = field(default_factory=list)
 
 
+DEFAULT_PROFILE_RESOLUTIONS: tuple[ProfileResolution, ...] = (
+    ProfileResolution(
+        key="fast",
+        label="Fast",
+        elevation_step_deg=20,
+        azimuth_step_deg=60,
+        min_cells_ready=6,
+    ),
+    ProfileResolution(
+        key="medium",
+        label="Medium",
+        elevation_step_deg=10,
+        azimuth_step_deg=30,
+        min_cells_ready=10,
+    ),
+    ProfileResolution(
+        key="fine",
+        label="Fine",
+        elevation_step_deg=5,
+        azimuth_step_deg=15,
+        min_cells_ready=16,
+    ),
+)
+
+
 class SolarInstallationProfile:
     """Learn and project the installation's unique solar response function.
 
@@ -87,10 +124,21 @@ class SolarInstallationProfile:
     a useful model.
     """
 
-    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry_id: str,
+        *,
+        resolution: ProfileResolution | None = None,
+    ) -> None:
         self._hass = hass
         self._entry_id = entry_id
-        self._store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry_id}")
+        self._resolution = resolution or DEFAULT_PROFILE_RESOLUTIONS[1]
+        self._store = Store(
+            hass,
+            STORAGE_VERSION,
+            f"{STORAGE_KEY}.{entry_id}.{self._resolution.key}",
+        )
         # (elevation_bucket, azimuth_bucket) → ResponseCell
         self._cells: dict[tuple[int, int], ResponseCell] = {}
         self._clear_sky_observations: int = 0
@@ -108,6 +156,14 @@ class SolarInstallationProfile:
         self._slot_elevation_samples: list[float] = []
         self._slot_azimuth_samples: list[float] = []
         self._slot_cloud_samples: list[float] = []
+
+    @property
+    def resolution_key(self) -> str:
+        return self._resolution.key
+
+    @property
+    def resolution_label(self) -> str:
+        return self._resolution.label
 
     # ------------------------------------------------------------------
     # Persistence
@@ -293,8 +349,8 @@ class SolarInstallationProfile:
         if actual_kwh < _MIN_VALID_KWH or forecast_kwh < _MIN_VALID_KWH:
             return False
 
-        e_bucket = _elevation_bucket(elevation_deg)
-        a_bucket = _azimuth_bucket(azimuth_deg)
+        e_bucket = _elevation_bucket(elevation_deg, self._resolution.elevation_step_deg)
+        a_bucket = _azimuth_bucket(azimuth_deg, self._resolution.azimuth_step_deg)
         if e_bucket is None or a_bucket is None:
             return False
 
@@ -328,7 +384,7 @@ class SolarInstallationProfile:
     @property
     def is_ready(self) -> bool:
         """True when enough confident cells exist for meaningful projection."""
-        return self._confident_cell_count >= _MIN_CELLS_READY
+        return self._confident_cell_count >= self._resolution.min_cells_ready
 
     @property
     def _confident_cell_count(self) -> int:
@@ -482,7 +538,7 @@ class SolarInstallationProfile:
         """Build diagnostics + comparison snapshot for sensor exposure."""
         confident = self._confident_cell_count
 
-        if confident >= _MIN_CELLS_READY:
+        if confident >= self._resolution.min_cells_ready:
             state = "ready"
         elif self._cells:
             state = "learning"
@@ -520,6 +576,8 @@ class SolarInstallationProfile:
         tomorrow = (now + timedelta(days=1)).date() if now is not None else None
 
         return ProfileSnapshot(
+            resolution_key=self.resolution_key,
+            resolution_label=self.resolution_label,
             state=state,
             populated_cells=len(self._cells),
             confident_cells=confident,
@@ -563,7 +621,7 @@ class SolarInstallationProfile:
         - any remaining missing confident cells are assumed to need full sample count
         """
         confident_cells = [cell for cell in self._cells.values() if cell.samples >= _MIN_SAMPLES_CONFIDENT]
-        if len(confident_cells) >= _MIN_CELLS_READY:
+        if len(confident_cells) >= self._resolution.min_cells_ready:
             return 0.0
 
         deficits = sorted(
@@ -574,13 +632,15 @@ class SolarInstallationProfile:
         confident_count = len(confident_cells)
         missing_slot_samples = 0
         for deficit in deficits:
-            if confident_count >= _MIN_CELLS_READY:
+            if confident_count >= self._resolution.min_cells_ready:
                 break
             missing_slot_samples += deficit
             confident_count += 1
 
-        if confident_count < _MIN_CELLS_READY:
-            missing_slot_samples += (_MIN_CELLS_READY - confident_count) * _MIN_SAMPLES_CONFIDENT
+        if confident_count < self._resolution.min_cells_ready:
+            missing_slot_samples += (
+                (self._resolution.min_cells_ready - confident_count) * _MIN_SAMPLES_CONFIDENT
+            )
 
         return missing_slot_samples * 0.5
 
@@ -609,8 +669,8 @@ class SolarInstallationProfile:
         for _ in range(365 * 24):
             elev = calc_elev(observer, dateandtime=cursor)
             if elev >= _MIN_ELEVATION_DEG:
-                e = _elevation_bucket(elev)
-                a = _azimuth_bucket(calc_az(observer, dateandtime=cursor))
+                e = _elevation_bucket(elev, self._resolution.elevation_step_deg)
+                a = _azimuth_bucket(calc_az(observer, dateandtime=cursor), self._resolution.azimuth_step_deg)
                 if e is not None and a is not None:
                     expected.add((e, a))
             cursor += timedelta(hours=1)
@@ -648,14 +708,14 @@ def _circular_mean_azimuth(angles: list[float]) -> float:
     return math.degrees(math.atan2(sin_sum, cos_sum)) % 360
 
 
-def _elevation_bucket(value: float) -> int | None:
+def _elevation_bucket(value: float, step_deg: int) -> int | None:
     if value < -10 or value > 90:
         return None
-    return int((max(-10.0, min(90.0, value)) // 10) * 10)
+    return int((max(-10.0, min(90.0, value)) // step_deg) * step_deg)
 
 
-def _azimuth_bucket(value: float) -> int | None:
-    return int((value % 360.0 // 30) * 30)
+def _azimuth_bucket(value: float, step_deg: int) -> int | None:
+    return int((value % 360.0 // step_deg) * step_deg)
 
 
 def _idw_interpolate(

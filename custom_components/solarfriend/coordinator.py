@@ -51,7 +51,7 @@ from .battery_optimizer import (
 )
 from .forecast_adapter import ForecastAdapter, get_forecast_for_period
 from .forecast_correction_model import ForecastCorrectionModel
-from .solar_installation_profile import SolarInstallationProfile
+from .solar_installation_profile import DEFAULT_PROFILE_RESOLUTIONS, SolarInstallationProfile
 from .forecast_tracker import ForecastTracker
 from .flex_load_manager import FlexLoadReservationManager, NullFlexLoadReservationManager
 from .price_adapter import PriceAdapter, PriceData, get_current_price_from_raw
@@ -159,6 +159,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._forecast_tracker: ForecastTracker | None = None
         self._forecast_correction_model: ForecastCorrectionModel | None = None
         self._solar_installation_profile: SolarInstallationProfile | None = None
+        self._solar_installation_profiles: dict[str, SolarInstallationProfile] = {}
 
         # BatteryOptimizer — instantiated in async_startup after tracker is ready
         self._optimizer: BatteryOptimizer | None = None
@@ -290,8 +291,17 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         await self._forecast_tracker.async_load()
         self._forecast_correction_model = ForecastCorrectionModel(self.hass, self._entry.entry_id)
         await self._forecast_correction_model.async_load()
-        self._solar_installation_profile = SolarInstallationProfile(self.hass, self._entry.entry_id)
-        await self._solar_installation_profile.async_load()
+        self._solar_installation_profiles = {
+            resolution.key: SolarInstallationProfile(
+                self.hass,
+                self._entry.entry_id,
+                resolution=resolution,
+            )
+            for resolution in DEFAULT_PROFILE_RESOLUTIONS
+        }
+        for profile in self._solar_installation_profiles.values():
+            await profile.async_load()
+        self._solar_installation_profile = self._solar_installation_profiles.get("medium")
 
         runtime_components = build_runtime_components(
             self.hass,
@@ -326,7 +336,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             await self._forecast_tracker.async_save()
         if self._forecast_correction_model is not None:
             await self._forecast_correction_model.async_save()
-        if self._solar_installation_profile is not None:
+        solar_profiles = getattr(self, "_solar_installation_profiles", {})
+        if solar_profiles:
+            for profile in solar_profiles.values():
+                await profile.async_save()
+        elif self._solar_installation_profile is not None:
             await self._solar_installation_profile.async_save()
 
     async def async_force_populate_load_model(self, days: int = 14) -> int:
@@ -1558,23 +1572,36 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 solar_azimuth=solar_azimuth,
             )
 
-        if self._solar_installation_profile is not None and solar_elevation is not None and solar_azimuth is not None:
+        solar_profiles = getattr(self, "_solar_installation_profiles", {})
+        active_solar_profiles = (
+            solar_profiles
+            if solar_profiles
+            else (
+                {"medium": self._solar_installation_profile}
+                if self._solar_installation_profile is not None
+                else {}
+            )
+        )
+        if active_solar_profiles and solar_elevation is not None and solar_azimuth is not None:
             _dt = (
                 0.0
                 if self._prev_update_time is None
                 else (now - self._prev_update_time).total_seconds()
             )
-            self._solar_installation_profile.update(
-                now=now,
-                pv_power_w=data.pv_power,
-                dt_seconds=_dt,
-                elevation_deg=solar_elevation,
-                azimuth_deg=solar_azimuth,
-                cloud_coverage_pct=weather_snapshot.get("cloud_coverage_pct") if weather_snapshot else None,
-                slot_forecast_kwh=_get_slot_forecast_kwh(
-                    data.forecast_data.hourly_forecast if data.forecast_data else [], now
-                ),
-            )
+            for profile in active_solar_profiles.values():
+                if profile is None:
+                    continue
+                profile.update(
+                    now=now,
+                    pv_power_w=data.pv_power,
+                    dt_seconds=_dt,
+                    elevation_deg=solar_elevation,
+                    azimuth_deg=solar_azimuth,
+                    cloud_coverage_pct=weather_snapshot.get("cloud_coverage_pct") if weather_snapshot else None,
+                    slot_forecast_kwh=_get_slot_forecast_kwh(
+                        data.forecast_data.hourly_forecast if data.forecast_data else [], now
+                    ),
+                )
 
         self._prev_battery_power = data.battery_power
         self._prev_update_time = now
@@ -1615,10 +1642,10 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             if self._forecast_correction_model is not None
             else []
         )
-        snapshot_builder.apply_solar_installation_profile(
+        snapshot_builder.apply_solar_installation_profiles(
             data=data,
             now=now,
-            profile=self._solar_installation_profile,
+            profiles=active_solar_profiles,
             latitude=self.hass.config.latitude,
             longitude=self.hass.config.longitude,
             raw_hourly_forecast=_raw_hourly,
