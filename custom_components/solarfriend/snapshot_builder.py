@@ -318,3 +318,14 @@ class SnapshotBuilder:
         data.profile_confidence = profile.confidence
         data.profile_days_collected = profile.days_collected
         data.consumption_profile_debug = profile.build_debug_snapshot()
+
+    def apply_model_evaluation_summary(self, *, data: Any, summary: Any | None) -> None:
+        """Project compact model-evaluation summary fields into the snapshot."""
+        if summary is None:
+            return
+        data.model_evaluation_period_month = summary.period_month
+        data.model_evaluation_rows = summary.rows
+        data.model_evaluation_best_model = summary.best_model
+        data.model_evaluation_mae_by_model = dict(summary.mae_by_model)
+        data.model_evaluation_mape_by_model = dict(summary.mape_by_model)
+        data.model_evaluation_bias_by_model = dict(summary.bias_by_model)

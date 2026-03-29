@@ -245,12 +245,12 @@ class SolarInstallationProfile:
         azimuth_deg: float,
         cloud_coverage_pct: float | None,
         slot_forecast_kwh: float,
-    ) -> bool:
+    ) -> dict[str, Any] | None:
         """Called every coordinator tick (30 s).
 
         Accumulates production and solar position over the current 30-min
         Solcast slot. Finalizes and records an observation when the slot ends.
-        Returns True if a new observation was finalized this tick.
+        Returns finalized slot data when a slot boundary is crossed.
         """
         slot_start = _current_slot_start(now)
         local_now = ha_dt.as_local(now) if now.tzinfo is not None else now
@@ -260,8 +260,9 @@ class SolarInstallationProfile:
             self._today_actual_kwh_by_slot = {}
 
         # Slot boundary crossed — finalize previous slot
+        finalized_slot: dict[str, Any] | None = None
         if self._active_slot is not None and slot_start != self._active_slot:
-            self._finalize_slot()
+            finalized_slot = self._finalize_slot()
 
         # Start new slot
         if self._active_slot is None:
@@ -280,13 +281,13 @@ class SolarInstallationProfile:
         if cloud_coverage_pct is not None:
             self._slot_cloud_samples.append(cloud_coverage_pct)
 
-        return False
+        return finalized_slot
 
-    def _finalize_slot(self) -> None:
+    def _finalize_slot(self) -> dict[str, Any] | None:
         """Finalize accumulated slot data and record observation if eligible."""
         if not self._slot_elevation_samples:
             self._reset_slot()
-            return
+            return None
 
         avg_elevation = sum(self._slot_elevation_samples) / len(self._slot_elevation_samples)
         avg_azimuth = _circular_mean_azimuth(self._slot_azimuth_samples)
@@ -315,7 +316,21 @@ class SolarInstallationProfile:
                 self._slot_forecast_kwh,
                 f"{avg_cloud:.0f}" if avg_cloud is not None else "?",
             )
+        finalized = {
+            "period_start": (
+                self._active_slot.replace(second=0, microsecond=0)
+                if self._active_slot is not None
+                else None
+            ),
+            "actual_kwh": round(self._slot_actual_kwh, 6),
+            "solcast_kwh": round(self._slot_forecast_kwh, 6),
+            "solar_elevation": round(avg_elevation, 3),
+            "solar_azimuth": round(avg_azimuth, 3),
+            "cloud_coverage_pct": round(avg_cloud, 3) if avg_cloud is not None else None,
+            "accepted": accepted,
+        }
         self._reset_slot()
+        return finalized
 
     def _reset_slot(self) -> None:
         self._active_slot = None
@@ -406,6 +421,24 @@ class SolarInstallationProfile:
             min_samples=_MIN_SAMPLES_CONFIDENT,
         )
         return factor if confidence >= _MIN_FACTOR_CONFIDENCE else None
+
+    def get_factor_with_confidence(
+        self,
+        elevation_deg: float,
+        azimuth_deg: float,
+    ) -> tuple[float | None, float]:
+        """Return Track-2 factor and confidence for one solar position."""
+        if not self.is_ready or elevation_deg < _MIN_ELEVATION_DEG:
+            return (None, 0.0)
+        factor, confidence = _idw_interpolate_with_confidence(
+            self._cells,
+            elevation_deg,
+            azimuth_deg,
+            min_samples=_MIN_SAMPLES_CONFIDENT,
+        )
+        if confidence < _MIN_FACTOR_CONFIDENCE:
+            return (None, confidence)
+        return (factor, confidence)
 
     def build_annual_projection(
         self,

@@ -29,6 +29,20 @@ UNIT_DKK_KWH = "DKK/kWh"
 UNIT_KR_KWH = "kr/kWh"
 UNIT_KR = "kr"
 
+_UNRECORDED_ATTRIBUTE_KEYS: dict[str, frozenset[str]] = {
+    "solar_installation_profile": frozenset(
+        {
+            "response_surface",
+            "variants",
+            "comparison_today",
+            "comparison_tomorrow",
+        }
+    ),
+    "solar_installation_profile_fast": frozenset({"response_surface"}),
+    "solar_installation_profile_medium": frozenset({"response_surface"}),
+    "solar_installation_profile_fine": frozenset({"response_surface"}),
+}
+
 
 @dataclass(frozen=True)
 class SolarFriendSensorDescription(SensorEntityDescription):
@@ -180,6 +194,18 @@ def _advanced_consumption_chart_attrs(d: "SolarFriendData", cfg: dict) -> dict:
         "rolling_7d_mae_w": d.advanced_consumption_model_7d_mae_w,
         "recent_daily_totals": d.advanced_consumption_model_recent_daily_totals,
         "last_weather_snapshot": d.advanced_consumption_model_last_weather,
+    }
+
+
+def _model_evaluation_summary_attrs(d: "SolarFriendData", _cfg: dict) -> dict:
+    """Expose compact current-month evaluation summary."""
+    return {
+        "period_month": d.model_evaluation_period_month,
+        "rows": d.model_evaluation_rows,
+        "best_model": d.model_evaluation_best_model,
+        "mae_by_model": d.model_evaluation_mae_by_model,
+        "mape_by_model": d.model_evaluation_mape_by_model,
+        "bias_by_model": d.model_evaluation_bias_by_model,
     }
 
 
@@ -1156,6 +1182,18 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         ),
         extra_attrs_fn=lambda d, cfg: _advanced_consumption_chart_attrs(d, cfg),
     ),
+    SolarFriendSensorDescription(
+        key="model_evaluation_summary",
+        name="Model Evaluation Summary",
+        native_unit_of_measurement="rows",
+        device_class=None,
+        state_class=None,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:chart-line",
+        value_fn=lambda d, _: d.model_evaluation_rows,
+        extra_attrs_fn=lambda d, cfg: _model_evaluation_summary_attrs(d, cfg),
+    ),
 )
 
 
@@ -1289,6 +1327,10 @@ class SolarFriendSensor(CoordinatorEntity[SolarFriendCoordinator], SensorEntity)
         )
         self._attr_entity_registry_visible_default = (
             description.entity_registry_visible_default
+        )
+        self._unrecorded_attributes = _UNRECORDED_ATTRIBUTE_KEYS.get(
+            description.key,
+            frozenset(),
         )
 
     @property

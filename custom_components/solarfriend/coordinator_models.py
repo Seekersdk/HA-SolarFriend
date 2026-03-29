@@ -144,6 +144,12 @@ class SolarFriendData:
     solar_profile_variants: dict[str, dict[str, Any]] = field(default_factory=dict)
     solar_profile_comparison_today: list[dict[str, Any]] = field(default_factory=list)
     solar_profile_comparison_tomorrow: list[dict[str, Any]] = field(default_factory=list)
+    model_evaluation_period_month: str = ""
+    model_evaluation_rows: int = 0
+    model_evaluation_best_model: str = "n/a"
+    model_evaluation_mae_by_model: dict[str, float] = field(default_factory=dict)
+    model_evaluation_mape_by_model: dict[str, float] = field(default_factory=dict)
+    model_evaluation_bias_by_model: dict[str, float] = field(default_factory=dict)
 
 
 def ev_device_info(coordinator: Any) -> DeviceInfo:

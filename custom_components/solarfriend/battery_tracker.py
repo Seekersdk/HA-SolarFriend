@@ -48,11 +48,11 @@ class BatteryTracker:
 
     @property
     def _charge_slid(self) -> float:
-        return self._battery_cost_per_kwh / 2
+        return self._battery_cost_per_kwh
 
     @property
     def _discharge_slid(self) -> float:
-        return self._battery_cost_per_kwh / 2
+        return 0.0
 
     @property
     def total_kwh(self) -> float:

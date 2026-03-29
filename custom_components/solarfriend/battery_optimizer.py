@@ -687,6 +687,8 @@ class BatteryOptimizer:
                 float(current_slot.get("discharge_to_load_w", current_slot["discharge_w"])) / 1000.0,
                 4,
             )
+            current_sell_price = float(current_slot.get("sell_price_dkk", current_slot["price_dkk"]))
+            current_sell_spread = current_sell_price - weighted_cost
             reserved_for_self_use_kwh = max(0.0, planned_self_use_kwh - future_recharge_kwh)
             exportable_surplus_kwh = max(0.0, available_kwh - reserved_for_self_use_kwh)
             if exportable_surplus_kwh + 1e-6 < sell_now_kwh or current_self_use_kwh > 0.1:
@@ -716,6 +718,26 @@ class BatteryOptimizer:
                 reason += f" — næste genladning {future_recharge_slot}"
             if future_recharge_kwh > 0:
                 reason += f", forventet genladning {future_recharge_kwh:.1f} kWh"
+            if current_sell_spread < self.min_charge_saving:
+                return OptimizeResult(
+                    strategy="IDLE",
+                    reason=(
+                        f"Holder batteri - eksportspread {current_sell_spread:.2f} kr/kWh "
+                        f"er under minimum {self.min_charge_saving:.2f} kr/kWh"
+                    ),
+                    target_soc=round(target_soc, 1) if target_soc is not None else None,
+                    charge_now=False,
+                    cheapest_charge_hour=cheapest_charge_hour,
+                    night_charge_kwh=total_planned_charge_kwh,
+                    morning_need_kwh=round(morning_need_kwh, 4),
+                    day_deficit_kwh=round(day_deficit_kwh, 4),
+                    peak_need_kwh=peak_need_kwh,
+                    expected_saving_dkk=expected_saving_dkk,
+                    weighted_battery_cost=weighted_cost,
+                    solar_fraction=solar_fraction,
+                    best_discharge_hours=best_discharge_hours,
+                    allowed_discharge_slots=allowed_discharge_slots,
+                )
             return OptimizeResult(
                 strategy="SELL_BATTERY",
                 reason=reason,
@@ -760,7 +782,7 @@ class BatteryOptimizer:
         if (
             current_slot
             and current_slot["discharge_w"] > 0
-            and current_price > cheapest_plan_price + self.battery_cost_per_kwh + self.min_charge_saving
+            and current_price > weighted_cost
         ):
             return OptimizeResult(
                 strategy="USE_BATTERY",

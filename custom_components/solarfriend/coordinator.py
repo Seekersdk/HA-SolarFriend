@@ -64,6 +64,7 @@ from .ev_runtime_controller import EVRuntimeController
 from .ev_runtime_service import EVRuntimeService
 from .coordinator_models import SolarFriendData, ev_device_info
 from .coordinator_policy import DEFAULT_COORDINATOR_POLICY
+from .model_evaluation_logging import ModelEvaluationLogger, lookup_forecast_kwh, lookup_weather_value
 from .price_runtime import PriceRuntime
 from .runtime_config import build_runtime_components, refresh_optimizer_runtime_settings
 from .shadow_logging import ShadowLogger
@@ -192,6 +193,11 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             log_path=hass.config.path("solarfriend_shadow_log.jsonl"),
             enabled=self._shadow_log_enabled,
         )
+        self._model_evaluation_logger = ModelEvaluationLogger(
+            hass,
+            entry_id=entry.entry_id,
+            log_path=hass.config.path("solarfriend_model_evaluation.jsonl"),
+        )
 
         # Battery sign convention check (runs once)
         self._battery_sign_warned: bool = False
@@ -261,6 +267,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         await self._profile.async_load(self.hass)
         await self._advanced_consumption_model.async_load(self.hass)
         await self._ensure_flex_load_manager().async_load()
+        await self._model_evaluation_logger.async_load()
 
         # ── Bootstrap consumption profile from recorder (runs once) ───────
         bootstrap_done = self._entry.data.get("bootstrap_done", False)
@@ -330,6 +337,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         await self._profile.async_save(self.hass)
         await self._advanced_consumption_model.async_save(self.hass)
         await self._ensure_flex_load_manager().async_save()
+        await self._model_evaluation_logger.async_save()
         if self._tracker is not None:
             await self._tracker.async_save()
         if self._forecast_tracker is not None:
@@ -1172,6 +1180,70 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("Shadow log write failed: %s", exc)
 
+    async def _append_model_evaluation_log(
+        self,
+        *,
+        finalized_slot: dict[str, Any] | None,
+        raw_hourly_forecast: list[dict[str, Any]],
+        empirical_hourly_forecast: list[dict[str, Any]],
+        active_solar_profiles: dict[str, Any],
+        hourly_weather_forecast: list[dict[str, Any]] | None,
+    ) -> None:
+        """Append one compact forecast-comparison row for a finalized slot."""
+        logger = getattr(self, "_model_evaluation_logger", None)
+        if logger is None:
+            return
+        if not finalized_slot:
+            return
+        slot_start = finalized_slot.get("period_start")
+        if not isinstance(slot_start, datetime):
+            return
+
+        actual_kwh = float(finalized_slot.get("actual_kwh", 0.0))
+        solcast_kwh = float(finalized_slot.get("solcast_kwh", 0.0))
+        if max(actual_kwh, solcast_kwh) <= 0:
+            return
+
+        empirical_kwh = lookup_forecast_kwh(empirical_hourly_forecast, slot_start)
+        temperature_c = lookup_weather_value(hourly_weather_forecast, slot_start, "temperature")
+        slot_minutes = max(1, int(_forecast_slot_delta(raw_hourly_forecast).total_seconds() // 60))
+
+        solar_elevation = finalized_slot.get("solar_elevation")
+        solar_azimuth = finalized_slot.get("solar_azimuth")
+        track2_rows: dict[str, dict[str, float | None]] = {}
+        if solar_elevation is not None and solar_azimuth is not None:
+            for key, profile in active_solar_profiles.items():
+                if profile is None:
+                    continue
+                factor, confidence = profile.get_factor_with_confidence(
+                    float(solar_elevation),
+                    float(solar_azimuth),
+                )
+                track2_rows[key] = {
+                    "kwh": (solcast_kwh * factor) if factor is not None else None,
+                    "confidence": confidence,
+                }
+
+        try:
+            await logger.append_slot(
+                slot_start=slot_start,
+                slot_minutes=slot_minutes,
+                actual_kwh=actual_kwh,
+                solcast_kwh=solcast_kwh,
+                empirical_kwh=empirical_kwh,
+                solar_elevation=float(solar_elevation) if solar_elevation is not None else None,
+                solar_azimuth=float(solar_azimuth) if solar_azimuth is not None else None,
+                cloud_coverage_pct=(
+                    float(finalized_slot["cloud_coverage_pct"])
+                    if finalized_slot.get("cloud_coverage_pct") is not None
+                    else None
+                ),
+                temperature_c=temperature_c,
+                track2_rows=track2_rows,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Model evaluation log write failed: %s", exc)
+
     def _update_price_history(self, price: float) -> None:
         self._ensure_price_runtime().update_history(price)
 
@@ -1582,6 +1654,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 else {}
             )
         )
+        finalized_solar_slot: dict[str, Any] | None = None
         if active_solar_profiles and solar_elevation is not None and solar_azimuth is not None:
             _dt = (
                 0.0
@@ -1591,7 +1664,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             for profile in active_solar_profiles.values():
                 if profile is None:
                     continue
-                profile.update(
+                finalized = profile.update(
                     now=now,
                     pv_power_w=data.pv_power,
                     dt_seconds=_dt,
@@ -1602,6 +1675,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                         data.forecast_data.hourly_forecast if data.forecast_data else [], now
                     ),
                 )
+                if finalized_solar_slot is None and finalized is not None:
+                    finalized_solar_slot = finalized
 
         self._prev_battery_power = data.battery_power
         self._prev_update_time = now
@@ -1650,6 +1725,13 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             longitude=self.hass.config.longitude,
             raw_hourly_forecast=_raw_hourly,
             empirical_hourly_forecast=_empirical_hourly,
+        )
+        await self._append_model_evaluation_log(
+            finalized_slot=finalized_solar_slot,
+            raw_hourly_forecast=_raw_hourly,
+            empirical_hourly_forecast=_empirical_hourly,
+            active_solar_profiles=active_solar_profiles,
+            hourly_weather_forecast=hourly_weather_forecast,
         )
 
         # ── Consumption profile chart (24h curve) ────────────────────────────
@@ -1747,6 +1829,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         )
 
         snapshot_builder.apply_profile_debug(data=data, profile=self._profile)
+        evaluation_logger = getattr(self, "_model_evaluation_logger", None)
+        if evaluation_logger is not None:
+            snapshot_builder.apply_model_evaluation_summary(
+                data=data,
+                summary=await evaluation_logger.build_summary(now=now),
+            )
 
         await self._append_shadow_log(
             self._build_shadow_payload(
@@ -1866,5 +1954,28 @@ def _get_slot_forecast_kwh(hourly_forecast: list[dict], now: datetime) -> float:
         except (TypeError, ValueError):
             continue
     return 0.0
+
+
+def _forecast_slot_delta(hourly_forecast: list[dict]) -> timedelta:
+    """Infer the forecast slot duration from period_start deltas."""
+    starts: list[datetime] = []
+    for entry in hourly_forecast:
+        ps = entry.get("period_start")
+        if ps is None:
+            continue
+        try:
+            if isinstance(ps, str):
+                ps = datetime.fromisoformat(ps)
+            if ps.tzinfo is not None:
+                ps = ha_dt.as_local(ps)
+            starts.append(ps.replace(second=0, microsecond=0, tzinfo=None))
+        except (TypeError, ValueError):
+            continue
+    starts.sort()
+    for idx in range(1, len(starts)):
+        delta = starts[idx] - starts[idx - 1]
+        if delta.total_seconds() > 0:
+            return delta
+    return timedelta(hours=1)
 
 
