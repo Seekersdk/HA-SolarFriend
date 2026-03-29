@@ -158,6 +158,29 @@ class BatteryOptimizer:
             for start, price in sorted(by_start.items(), key=lambda item: item[0])
         ]
 
+    @staticmethod
+    def _has_prices_beyond_next_midnight(
+        raw_prices: list[dict[str, Any]],
+        now: datetime,
+    ) -> bool:
+        """Return True when the known price horizon reaches beyond the next midnight."""
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
+        next_midnight = (current_hour + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        for entry in raw_prices:
+            raw_hour = entry.get("hour") if entry.get("hour") is not None else entry.get("start")
+            if raw_hour is None:
+                continue
+            try:
+                slot_start = raw_hour if isinstance(raw_hour, datetime) else datetime.fromisoformat(str(raw_hour))
+                slot_start = BatteryOptimizer._normalize_datetime(slot_start, now).replace(
+                    minute=0, second=0, microsecond=0
+                )
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if slot_start >= next_midnight:
+                return True
+        return False
+
     def _build_forecast_map(
         self,
         hourly_forecast: list | None,
@@ -205,6 +228,7 @@ class BatteryOptimizer:
         raw_prices: list[dict[str, Any]],
         weighted_cost: float,
         hourly_forecast: list | None,
+        allow_battery_export: bool = True,
         reserved_solar_kwh: dict[datetime, float] | None = None,
         raw_sell_prices: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
@@ -292,6 +316,8 @@ class BatteryOptimizer:
                 for charge_units in charge_range:
                     discharge_to_load_units = min(net_load_units[slot_idx], discharge_units)
                     export_units = max(0, discharge_units - discharge_to_load_units)
+                    if not allow_battery_export and export_units > 0:
+                        continue
                     if solar_stored_units > 0 and export_units > 0:
                         continue
                     next_stored_units = stored_after_solar - discharge_units + charge_units
@@ -336,6 +362,10 @@ class BatteryOptimizer:
             )
             discharge_to_load_kwh = min(slot["net_load_kwh"], discharge_total_kwh)
             battery_export_kwh = max(0.0, discharge_total_kwh - discharge_to_load_kwh)
+            if not allow_battery_export and battery_export_kwh > 0:
+                stored_kwh += battery_export_kwh
+                discharge_total_kwh = discharge_to_load_kwh
+                battery_export_kwh = 0.0
             if battery_export_kwh > 0:
                 sell_spread = float(slot["sell_price"]) - weighted_cost
                 if sell_spread < self.min_charge_saving:
@@ -477,6 +507,10 @@ class BatteryOptimizer:
             if sell_prices
             else current_price
         ) or current_price
+        allow_battery_export = (
+            now.hour < 12
+            or self._has_prices_beyond_next_midnight(raw_prices, now)
+        )
 
         if current_price < 0:
             self._last_plan = self._build_horizon_plan(
@@ -485,6 +519,7 @@ class BatteryOptimizer:
                 raw_prices=raw_prices,
                 weighted_cost=weighted_cost,
                 hourly_forecast=hourly_forecast,
+                allow_battery_export=allow_battery_export,
                 reserved_solar_kwh=reserved_solar_kwh,
                 raw_sell_prices=sell_prices,
             )
@@ -513,6 +548,7 @@ class BatteryOptimizer:
                 raw_prices=raw_prices,
                 weighted_cost=weighted_cost,
                 hourly_forecast=hourly_forecast,
+                allow_battery_export=allow_battery_export,
                 reserved_solar_kwh=reserved_solar_kwh,
                 raw_sell_prices=sell_prices,
             )
@@ -552,6 +588,7 @@ class BatteryOptimizer:
             raw_prices=raw_prices,
             weighted_cost=weighted_cost,
             hourly_forecast=hourly_forecast,
+            allow_battery_export=allow_battery_export,
             reserved_solar_kwh=reserved_solar_kwh,
             raw_sell_prices=sell_prices,
         )

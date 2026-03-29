@@ -441,21 +441,17 @@ def test_save_solar_when_sol_incoming():
         f"Expected SAVE_SOLAR, got {result.strategy}: {result.reason}"
 
 
-def test_sell_battery_when_high_price_and_sol_incoming():
-    """Daytime + high price + high SOC still keeps battery for current self-use.
+def test_no_midday_sell_battery_without_next_day_prices():
+    """After noon, missing post-midnight prices must block battery export planning.
 
     now=12:00 — solar has been up since 07:30 (SUNRISE+1h), so load_until_solar=0.
-    SOC=80%: available=7.0 kWh, sellable=7.0 kWh.
-    net_gain = 7.0 × (1.80 − 0.25) = 10.85 kr > 0.20 ✓
-    current_price (1.80) > battery_cost (0.25) + min_saving (0.20) = 0.45 ✓
-    current_price (1.80) > weighted_cost (0.0) ✓
+    Without prices beyond midnight, export should stay disabled even if the current slot is expensive.
     """
     now = datetime(2026, 3, 22, 12, 0, 0)
     prices = make_prices(cheap_hour=2, expensive_hour=12)
     result = run(now, soc=80.0, prices=prices, forecast=None)
-    assert result.strategy == "USE_BATTERY", \
-        f"Expected USE_BATTERY, got {result.strategy}: {result.reason}"
-    assert result.expected_saving_dkk > 0.0
+    assert result.strategy != "SELL_BATTERY", \
+        f"Expected no SELL_BATTERY, got {result.strategy}: {result.reason}"
 
 
 def test_sell_battery_is_blocked_when_battery_is_more_valuable_later_before_recharge():
@@ -492,7 +488,7 @@ def test_sell_battery_is_blocked_when_battery_is_more_valuable_later_before_rech
 
 
 def test_sell_battery_sells_only_energy_not_needed_before_next_recharge():
-    """Current-slot self-use blocks battery export even if later recharge is cheap."""
+    """With export blocked, current-slot self-use can still choose ordinary USE_BATTERY."""
     now = datetime(2026, 3, 22, 12, 0, 0)
     prices = _explicit_prices(
         now,
@@ -522,10 +518,9 @@ def test_sell_battery_sells_only_energy_not_needed_before_next_recharge():
     )
 
     assert result.strategy == "USE_BATTERY", result.reason
-    assert "forventet husforbrug i denne time" in result.reason
     assert result.expected_saving_dkk > 0.0
     plan = opt.get_last_plan()
-    assert float(plan[0]["battery_export_w"]) > 0
+    assert float(plan[0]["battery_export_w"]) == 0
     assert float(plan[0]["sell_price_dkk"]) == 0.52
 
 
@@ -749,6 +744,25 @@ def test_horizon_uses_battery_before_free_night_charge():
     plan_by_hour = {slot["hour_str"]: slot for slot in plan}
     assert plan_by_hour["18:00"]["discharge_w"] > 0
     assert plan_by_hour["02:00"]["grid_charge_w"] > 0 or plan_by_hour["03:00"]["grid_charge_w"] > 0
+
+
+def test_no_sell_battery_after_noon_without_prices_beyond_midnight():
+    """After noon, battery export must stay off until tomorrow prices are known."""
+    now = datetime(2026, 3, 22, 19, 0, 0)
+    prices = _explicit_prices(now, [1.20, 1.10, 1.00, 0.90, 0.80])
+    sell_prices = _explicit_prices(now, [0.80, 0.75, 0.70, 0.65, 0.60])
+
+    result, plan = run_with_plan(
+        now,
+        soc=90.0,
+        prices=prices,
+        sell_prices=sell_prices,
+        forecast=None,
+        profile=_ScheduledProfile(default_watt=0.0),
+    )
+
+    assert result.strategy != "SELL_BATTERY", result.reason
+    assert all(float(slot["battery_export_w"]) == 0.0 for slot in plan), plan
 
 
 def test_horizon_skips_battery_use_during_cheap_morning():
