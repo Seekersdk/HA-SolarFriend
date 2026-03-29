@@ -30,17 +30,12 @@ UNIT_KR_KWH = "kr/kWh"
 UNIT_KR = "kr"
 
 _UNRECORDED_ATTRIBUTE_KEYS: dict[str, frozenset[str]] = {
-    "solar_installation_profile": frozenset(
-        {
-            "response_surface",
-            "variants",
-            "comparison_today",
-            "comparison_tomorrow",
-        }
-    ),
+    "solar_installation_profile": frozenset(),
     "solar_installation_profile_fast": frozenset({"response_surface"}),
     "solar_installation_profile_medium": frozenset({"response_surface"}),
     "solar_installation_profile_fine": frozenset({"response_surface"}),
+    "solar_profile_comparison_today": frozenset({"comparison"}),
+    "solar_profile_comparison_tomorrow": frozenset({"comparison"}),
 }
 
 
@@ -150,7 +145,7 @@ def _forecast_correction_model_attrs(d: "SolarFriendData", cfg: dict) -> dict:
 
 
 def _solar_installation_profile_attrs(d: "SolarFriendData", cfg: dict) -> dict:
-    """Expose solar installation profile diagnostics and comparison data for graphs."""
+    """Expose compact solar installation profile diagnostics."""
     return {
         "populated_cells": d.solar_profile_populated_cells,
         "confident_cells": d.solar_profile_confident_cells,
@@ -160,11 +155,12 @@ def _solar_installation_profile_attrs(d: "SolarFriendData", cfg: dict) -> dict:
         "annual_paths_missing": d.solar_profile_annual_paths_missing,
         "clear_sky_observations": d.solar_profile_clear_sky_observations,
         "estimated_hours_to_ready": d.solar_profile_estimated_hours_to_ready,
-        "response_surface": d.solar_profile_response_surface,
-        "variants": d.solar_profile_variants,
-        "comparison_today": d.solar_profile_comparison_today,
-        "comparison_tomorrow": d.solar_profile_comparison_tomorrow,
     }
+
+
+def _solar_profile_comparison_attrs(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Expose one solar-profile comparison series as a dedicated payload."""
+    return {"comparison": rows}
 
 
 def _solar_profile_variant(d: "SolarFriendData", key: str) -> dict[str, Any]:
@@ -809,6 +805,34 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         icon="mdi:solar-panel",
         value_fn=lambda d, _: d.solar_profile_state,
         extra_attrs_fn=lambda d, cfg: _solar_installation_profile_attrs(d, cfg),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_comparison_today",
+        name="Solar Profile Comparison Today",
+        native_unit_of_measurement="rows",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:chart-timeline-variant",
+        value_fn=lambda d, _: len(d.solar_profile_comparison_today),
+        extra_attrs_fn=lambda d, _: _solar_profile_comparison_attrs(
+            d.solar_profile_comparison_today
+        ),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_comparison_tomorrow",
+        name="Solar Profile Comparison Tomorrow",
+        native_unit_of_measurement="rows",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_visible_default=False,
+        icon="mdi:chart-timeline-variant",
+        value_fn=lambda d, _: len(d.solar_profile_comparison_tomorrow),
+        extra_attrs_fn=lambda d, _: _solar_profile_comparison_attrs(
+            d.solar_profile_comparison_tomorrow
+        ),
     ),
     SolarFriendSensorDescription(
         key="solar_profile_hours_to_ready",
