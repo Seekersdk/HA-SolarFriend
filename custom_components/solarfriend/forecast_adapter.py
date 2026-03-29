@@ -73,6 +73,14 @@ def get_forecast_for_period(
     return round(total, 4)
 
 
+def _power_from_forecast_entry(entry: dict[str, Any]) -> float:
+    """Convert one forecast slot from kWh over interval to average W."""
+    interval_hours = float(entry.get("interval_hours", 0.5) or 0.5)
+    if interval_hours <= 0:
+        interval_hours = 0.5
+    return float(entry.get("pv_estimate_kwh", 0.0)) * 1000.0 / interval_hours
+
+
 # ---------------------------------------------------------------------------
 # ForecastAdapter
 # ---------------------------------------------------------------------------
@@ -178,6 +186,7 @@ class ForecastAdapter:
 
                 hourly_forecast.append({
                     "period_start":      ps,
+                    "interval_hours":    interval_hours,
                     "pv_estimate_kwh":   round(_clamp_kwh(kw),   4),
                     "pv_estimate10_kwh": round(_clamp_kwh(kw10), 4),
                     "pv_estimate90_kwh": round(_clamp_kwh(kw90), 4),
@@ -195,7 +204,7 @@ class ForecastAdapter:
         for entry in hourly_forecast:
             ps = entry["period_start"]
             if isinstance(ps, datetime) and ps >= next_hour_start:
-                power_next_w = entry["pv_estimate_kwh"] * 2000  # kWh/30min → W
+                power_next_w = _power_from_forecast_entry(entry)
                 break
 
         # Confidence from sensor attributes (optional)
@@ -268,6 +277,7 @@ class ForecastAdapter:
                     kwh = float(s.state)
                     hourly_forecast.append({
                         "period_start":      this_hour + timedelta(hours=offset),
+                        "interval_hours":    1.0,
                         "pv_estimate_kwh":   round(kwh, 4),
                         "pv_estimate10_kwh": round(kwh * 0.7, 4),
                         "pv_estimate90_kwh": round(kwh * 1.3, 4),
@@ -281,8 +291,8 @@ class ForecastAdapter:
         except (ValueError, TypeError):
             remaining_today = total_today
 
-        power_now_w  = hourly_forecast[0]["pv_estimate_kwh"] * 2000 if hourly_forecast else 0.0
-        power_next_w = hourly_forecast[1]["pv_estimate_kwh"] * 2000 if len(hourly_forecast) > 1 else 0.0
+        power_now_w  = _power_from_forecast_entry(hourly_forecast[0]) if hourly_forecast else 0.0
+        power_next_w = _power_from_forecast_entry(hourly_forecast[1]) if len(hourly_forecast) > 1 else 0.0
 
         return ForecastData(
             total_today_kwh=total_today,

@@ -79,6 +79,13 @@ def _forecast_soc_attrs(d: "SolarFriendData", cfg: dict) -> dict:
     return {"hourly_soc": hourly_soc, "hourly_power": hourly_power}
 
 
+def _rounded_or_none(value: float | None, digits: int) -> float | None:
+    """Round numeric values but preserve None for temporarily missing data."""
+    if value is None:
+        return None
+    return round(value, digits)
+
+
 def _battery_plan_attrs(d: "SolarFriendData", cfg: dict) -> dict:
     """Expose battery plan series for charts."""
     plan = d.battery_plan or []
@@ -286,7 +293,7 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         name="Forecast Today",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=None,
         icon="mdi:sun-clock",
         value_fn=lambda d, _: d.forecast,
     ),
@@ -296,20 +303,22 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         name="Battery Energy",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:battery",
-        value_fn=lambda d, cfg: round(
-            d.battery_soc / 100 * cfg.get("battery_capacity_kwh", 0), 2
-        ),
+        value_fn=lambda d, cfg: None
+        if d.battery_soc is None
+        else round(d.battery_soc / 100 * cfg.get("battery_capacity_kwh", 0), 2),
     ),
     SolarFriendSensorDescription(
         key="battery_usable_kwh",
         name="Battery Usable Energy",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:battery-arrow-down",
-        value_fn=lambda d, cfg: round(
+        value_fn=lambda d, cfg: None
+        if d.battery_soc is None
+        else round(
             max(0.0, (d.battery_soc - cfg.get("battery_min_soc", 0)) / 100)
             * cfg.get("battery_capacity_kwh", 0),
             2,
@@ -361,7 +370,7 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL,
         icon="mdi:solar-power",
-        value_fn=lambda d, _: round(d.battery_solar_kwh, 3),
+        value_fn=lambda d, _: _rounded_or_none(d.battery_solar_kwh, 3),
     ),
     SolarFriendSensorDescription(
         key="battery_grid_kwh",
@@ -370,7 +379,7 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL,
         icon="mdi:transmission-tower",
-        value_fn=lambda d, _: round(d.battery_grid_kwh, 3),
+        value_fn=lambda d, _: _rounded_or_none(d.battery_grid_kwh, 3),
     ),
     SolarFriendSensorDescription(
         key="battery_weighted_cost",
@@ -379,7 +388,7 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         state_class=None,
         icon="mdi:cash",
-        value_fn=lambda d, _: round(d.battery_weighted_cost, 3),
+        value_fn=lambda d, _: _rounded_or_none(d.battery_weighted_cost, 3),
     ),
     SolarFriendSensorDescription(
         key="battery_solar_fraction",
@@ -388,7 +397,9 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         device_class=None,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:percent",
-        value_fn=lambda d, _: round(d.battery_solar_fraction * 100, 1),
+        value_fn=lambda d, _: None
+        if d.battery_solar_fraction is None
+        else round(d.battery_solar_fraction * 100, 1),
     ),
     # --- Savings ---
     SolarFriendSensorDescription(
@@ -665,7 +676,7 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         name="Solar Next 2 Hours",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=None,
         icon="mdi:weather-sunny-alert",
         value_fn=lambda d, _: round(d.solar_next_2h, 3),
     ),
@@ -674,7 +685,7 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         name="Solar Until Sunset",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
+        state_class=None,
         icon="mdi:weather-sunset",
         value_fn=lambda d, _: round(d.solar_until_sunset, 3),
     ),
@@ -1461,7 +1472,7 @@ class SolarFriendEVPlanSensor(CoordinatorEntity[SolarFriendCoordinator], SensorE
         dep = self.coordinator.ev_next_departure
         return {
             "hourly_plan": data.ev_plan,
-            "departure": dep.strftime("%H:%M"),
+            "departure": dep.strftime("%H:%M") if dep is not None else None,
             "target_soc": data.ev_target_soc,
             "current_soc": data.ev_vehicle_soc,
             "charge_mode": data.ev_charge_mode,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
+import logging
 import math
 from typing import Any
 
@@ -18,6 +19,7 @@ from homeassistant.util import dt as ha_dt
 STORAGE_VERSION = 1
 STORAGE_KEY = "solarfriend.flex_load_reservations"
 _STEP_MINUTES = 30
+_LOGGER = logging.getLogger(__name__)
 
 
 def _ensure_local(value: datetime) -> datetime:

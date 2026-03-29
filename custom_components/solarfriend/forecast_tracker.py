@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .forecast_adapter import ForecastData, get_forecast_for_period
+from .time_utils import normalize_local_datetime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -263,6 +264,8 @@ class ForecastTracker:
         now: datetime,
     ) -> float:
         """Return forecast energy from day start until now, prorating the active slot."""
+        start_dt = normalize_local_datetime(start_dt)
+        now = normalize_local_datetime(now)
         entries: list[tuple[datetime, float]] = []
         for entry in hourly_forecast:
             raw_start = entry.get("period_start")
@@ -277,6 +280,7 @@ class ForecastTracker:
                 slot_start = raw_start
             else:
                 continue
+            slot_start = normalize_local_datetime(slot_start)
             entries.append((slot_start, float(entry.get("pv_estimate_kwh", 0.0))))
 
         entries.sort(key=lambda item: item[0])

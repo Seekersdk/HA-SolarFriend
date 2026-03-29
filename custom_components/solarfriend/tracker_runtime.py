@@ -247,7 +247,7 @@ class TrackerRuntime:
             deviation_kind,
             planned_discharge_w if deviation_kind == "missed_discharge" else planned_charge_w,
             battery_power,
-            current_slot["hour_str"],
+            current_slot.get("hour_str", current_slot.get("hour", "?")),
         )
         return True
 

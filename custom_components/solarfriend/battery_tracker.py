@@ -247,6 +247,16 @@ class BatteryTracker:
         if tracked_total == 0 and actual_total == 0:
             return
 
+        if tracked_total > 0 and actual_total == 0 and actual_soc < min_soc:
+            _LOGGER.debug(
+                "BatteryTracker ignoring sub-min SOC dip (actual_soc=%.2f < min_soc=%.2f) "
+                "while %.3f kWh is still tracked",
+                actual_soc,
+                min_soc,
+                tracked_total,
+            )
+            return
+
         if tracked_total == 0:
             # Cold-start: source unknown — use 50/50 split so savings estimates are neutral
             # rather than optimistically assuming all energy is solar.

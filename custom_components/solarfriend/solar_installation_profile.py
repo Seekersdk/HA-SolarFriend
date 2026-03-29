@@ -418,6 +418,8 @@ class SolarInstallationProfile:
             self._cells,
             elevation_deg,
             azimuth_deg,
+            elevation_step_deg=self._resolution.elevation_step_deg,
+            azimuth_step_deg=self._resolution.azimuth_step_deg,
             min_samples=_MIN_SAMPLES_CONFIDENT,
         )
         return factor if confidence >= _MIN_FACTOR_CONFIDENCE else None
@@ -434,6 +436,8 @@ class SolarInstallationProfile:
             self._cells,
             elevation_deg,
             azimuth_deg,
+            elevation_step_deg=self._resolution.elevation_step_deg,
+            azimuth_step_deg=self._resolution.azimuth_step_deg,
             min_samples=_MIN_SAMPLES_CONFIDENT,
         )
         if confidence < _MIN_FACTOR_CONFIDENCE:
@@ -475,7 +479,12 @@ class SolarInstallationProfile:
             if elev >= _MIN_ELEVATION_DEG:
                 az = calc_az(observer, dateandtime=cursor)
                 factor, confidence = _idw_interpolate_with_confidence(
-                    self._cells, elev, az, min_samples=_MIN_SAMPLES_CONFIDENT
+                    self._cells,
+                    elev,
+                    az,
+                    elevation_step_deg=self._resolution.elevation_step_deg,
+                    azimuth_step_deg=self._resolution.azimuth_step_deg,
+                    min_samples=_MIN_SAMPLES_CONFIDENT,
                 )
                 raw_kwh = forecast_by_slot.get(
                     cursor.replace(tzinfo=None).replace(second=0, microsecond=0),
@@ -536,7 +545,12 @@ class SolarInstallationProfile:
             if self.is_ready and elev >= _MIN_ELEVATION_DEG and raw_kwh > 0:
                 az = calc_az(observer, dateandtime=cursor)
                 factor, factor_confidence = _idw_interpolate_with_confidence(
-                    self._cells, elev, az, min_samples=_MIN_SAMPLES_CONFIDENT
+                    self._cells,
+                    elev,
+                    az,
+                    elevation_step_deg=self._resolution.elevation_step_deg,
+                    azimuth_step_deg=self._resolution.azimuth_step_deg,
+                    min_samples=_MIN_SAMPLES_CONFIDENT,
                 )
                 if factor_confidence >= _MIN_FACTOR_CONFIDENCE:
                     calculated_kwh = round(raw_kwh * factor, 4)
@@ -756,6 +770,8 @@ def _idw_interpolate(
     elevation_deg: float,
     azimuth_deg: float,
     *,
+    elevation_step_deg: int,
+    azimuth_step_deg: int,
     min_samples: int,
 ) -> float:
     """Inverse-distance weighting interpolation over confident response cells."""
@@ -763,6 +779,8 @@ def _idw_interpolate(
         cells,
         elevation_deg,
         azimuth_deg,
+        elevation_step_deg=elevation_step_deg,
+        azimuth_step_deg=azimuth_step_deg,
         min_samples=min_samples,
     )
     return factor
@@ -773,6 +791,8 @@ def _idw_interpolate_with_confidence(
     elevation_deg: float,
     azimuth_deg: float,
     *,
+    elevation_step_deg: int,
+    azimuth_step_deg: int,
     min_samples: int,
 ) -> tuple[float, float]:
     """Return raw IDW factor plus confidence for a solar position.
@@ -790,8 +810,8 @@ def _idw_interpolate_with_confidence(
     nearest_samples = 0
 
     for (e_bucket, a_bucket), cell in usable.items():
-        de = elevation_deg - (e_bucket + 5.0)       # compare to bucket centre
-        da = azimuth_deg - (a_bucket + 15.0)
+        de = elevation_deg - (e_bucket + elevation_step_deg / 2.0)
+        da = azimuth_deg - (a_bucket + azimuth_step_deg / 2.0)
         # Wrap azimuth distance to [-180, 180]
         da = (da + 180) % 360 - 180
         dist_sq = (

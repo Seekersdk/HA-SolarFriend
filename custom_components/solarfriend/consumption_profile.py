@@ -385,7 +385,7 @@ class ConsumptionProfile:
             clean,
         )
 
-        now = datetime.now()
+        now = ha_dt.now()
         hour = now.hour
         profile_key = "weekend" if now.weekday() >= 5 else "weekday"
 

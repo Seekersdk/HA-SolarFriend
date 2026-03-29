@@ -233,6 +233,8 @@ class BatteryOptimizer:
         raw_sell_prices: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Build a battery plan over the full known price horizon."""
+        if self.battery_capacity_kwh <= 0:
+            return []
         horizon = self._build_price_horizon(raw_prices, now)
         if not horizon:
             return []
@@ -491,6 +493,13 @@ class BatteryOptimizer:
         Plans over the full known price horizon and maps the first slot to the
         action for the current cycle.
         """
+        if self.battery_capacity_kwh <= 0:
+            self._last_plan = []
+            return OptimizeResult.idle(
+                "Ugyldig batterikapacitet",
+                weighted_cost=self._tracker.weighted_cost,
+                solar_fraction=self._tracker.solar_fraction,
+            )
         available_kwh = max(
             0.0,
             (current_soc - self.battery_min_soc) / 100.0 * self.battery_capacity_kwh,
@@ -640,6 +649,11 @@ class BatteryOptimizer:
                 for slot in self._last_plan
             ),
             4,
+        )
+        expected_saving_per_kwh = (
+            expected_saving_dkk / total_planned_charge_kwh
+            if total_planned_charge_kwh > 0
+            else 0.0
         )
         allowed_discharge_slots = self._build_allowed_discharge_slots(
             now=now,
@@ -802,7 +816,7 @@ class BatteryOptimizer:
             )
 
         if total_planned_charge_kwh > 0 and (
-            available_kwh < morning_need_kwh or expected_saving_dkk > self.min_charge_saving
+            available_kwh < morning_need_kwh or expected_saving_per_kwh > self.min_charge_saving
         ):
             charge_strategy = "CHARGE_NIGHT" if now < next_sunrise or now.time() > sunset_time.time() else "CHARGE_GRID"
             return OptimizeResult(

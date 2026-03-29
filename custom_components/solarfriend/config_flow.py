@@ -694,6 +694,7 @@ class SolarFriendConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
+        power_sensors: dict[str, str] = {}
 
         # For klatremis: only show sensors from the Deye/ESPHome device.
         # Fall back to all power/battery sensors if none found.

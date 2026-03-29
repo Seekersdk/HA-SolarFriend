@@ -87,7 +87,7 @@ def _parse_dt(val) -> datetime:
 def _normalize_local_datetime(value: datetime) -> datetime:
     """Return a timezone-aware local datetime for safe comparisons."""
     if value.tzinfo is None:
-        return ha_dt.as_local(value.replace(tzinfo=timezone.utc))
+        value = value.replace(tzinfo=timezone.utc)
     return ha_dt.as_local(value)
 
 UPDATE_INTERVAL = timedelta(seconds=30)
@@ -938,19 +938,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             pv_power=pv_power,
             forecast_total_today_kwh=forecast_total_today_kwh,
         )
-        return
-
-        if self._prev_update_time is None:
-            dt_seconds = 0.0
-        else:
-            dt_seconds = (now - self._prev_update_time).total_seconds()
-
-        self._forecast_tracker.update(
-            now=now,
-            pv_power_w=pv_power,
-            dt_seconds=dt_seconds,
-            forecast_total_today_kwh=forecast_total_today_kwh,
-        )
 
         if (
             self._last_forecast_tracker_save is None
@@ -978,64 +965,6 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             battery_power=battery_power,
             normalize_local_datetime=_normalize_local_datetime,
         )
-
-        plan = self._optimizer.get_last_plan()
-        if not plan:
-            self._last_plan_deviation_key = None
-            return False
-
-        current_hour = now.replace(minute=0, second=0, microsecond=0)
-        current_slot = next(
-            (
-                slot for slot in plan
-                if _normalize_local_datetime(datetime.fromisoformat(slot["hour"])).replace(
-                    minute=0,
-                    second=0,
-                    microsecond=0,
-                ) == current_hour
-            ),
-            None,
-        )
-        if current_slot is None:
-            self._last_plan_deviation_key = None
-            return False
-
-        planned_discharge_w = float(current_slot.get("discharge_w", 0.0))
-        planned_charge_w = float(current_slot.get("grid_charge_w", 0.0)) + float(
-            current_slot.get("solar_charge_w", 0.0)
-        )
-        actual_discharge_w = max(0.0, battery_power)
-        actual_charge_w = max(0.0, -battery_power)
-
-        deviation_kind: str | None = None
-        if (
-            planned_discharge_w >= _PLAN_DEVIATION_MIN_W
-            and actual_discharge_w < max(_PLAN_DEVIATION_MIN_W, planned_discharge_w * _PLAN_DEVIATION_FRACTION)
-        ):
-            deviation_kind = "missed_discharge"
-        elif (
-            planned_charge_w >= _PLAN_DEVIATION_MIN_W
-            and actual_charge_w < max(_PLAN_DEVIATION_MIN_W, planned_charge_w * _PLAN_DEVIATION_FRACTION)
-        ):
-            deviation_kind = "missed_charge"
-
-        if deviation_kind is None:
-            self._last_plan_deviation_key = None
-            return False
-
-        deviation_key = f"{current_slot['hour']}|{deviation_kind}"
-        if deviation_key == self._last_plan_deviation_key:
-            return False
-
-        self._last_plan_deviation_key = deviation_key
-        _LOGGER.info(
-            "Battery plan deviation detected: %s planned=%.0fW actual_battery=%.0fW slot=%s",
-            deviation_kind,
-            planned_discharge_w if deviation_kind == "missed_discharge" else planned_charge_w,
-            battery_power,
-            current_slot["hour_str"],
-        )
-        return True
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
@@ -1528,7 +1457,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         # Populate raw readings — sum PV1 + PV2 if both are configured
         data.pv_power      = readings.get("pv_power", 0.0) + readings.get("pv2_power", 0.0)
         data.grid_power    = readings.get("grid_power", 0.0)
-        data.battery_soc   = readings.get("battery_soc", 0.0)
+        data.battery_soc   = readings.get("battery_soc")
         data.battery_power = readings.get("battery_power", 0.0)
         raw_load_power     = readings.get("load_power", 0.0)
 
@@ -1803,6 +1732,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 self.data.plan_optimize_result if self.data else data.plan_optimize_result
             )
 
+        optimizer_ran = (
+            startup_inputs_recovered
+            or should_run_deviation
+            or should_run_hourly
+        )
+
         data.battery_plan = self._build_battery_plan(data, now)
         if data.battery_plan and self._last_plan_optimize_result is not None:
             data.plan_optimize_result = self._last_plan_optimize_result
@@ -1841,7 +1776,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             self._build_shadow_payload(
                 data,
                 now,
-                optimizer_ran=should_run_hourly,
+                optimizer_ran=optimizer_ran,
             )
         )
 

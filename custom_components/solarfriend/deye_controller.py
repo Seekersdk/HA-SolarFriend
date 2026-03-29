@@ -94,10 +94,15 @@ class DeyeController(InverterController):
             )
         return expected
 
+    @staticmethod
+    def _uses_immediate_tp1_start(strategy: str) -> bool:
+        """Return True for strategies where TP1 start means 'start now'."""
+        return strategy in {"CHARGE_GRID", "USE_BATTERY", "SELL_BATTERY"}
+
     def _expected_state_for(self, result: OptimizeResult) -> dict[str, str | float]:
         """Return the expected live inverter state for the current strategy."""
         current_hhmm = self._current_hhmm()
-        target_soc = int(result.target_soc) if result.target_soc else 80
+        target_soc = int(result.target_soc) if result.target_soc is not None else 80
 
         if result.strategy == "CHARGE_NIGHT":
             raw = result.cheapest_charge_hour
@@ -206,6 +211,11 @@ class DeyeController(InverterController):
         for entity_id, desired in expected.items():
             if not entity_id:
                 continue
+            if (
+                entity_id == self._tp1_start
+                and self._uses_immediate_tp1_start(result.strategy)
+            ):
+                continue
             state_obj = states.get(entity_id)
             if state_obj is None:
                 return False
@@ -275,7 +285,7 @@ class DeyeController(InverterController):
         else:
             tp_start = 0
 
-        target_soc = int(result.target_soc) if result.target_soc else 80
+        target_soc = int(result.target_soc) if result.target_soc is not None else 80
 
         await self._set_switch(self._grid_charge, True)
         await self._set_switch(self._time_of_use, True)
@@ -335,7 +345,7 @@ class DeyeController(InverterController):
         await self._set_number(self._tp1_start, self._current_hhmm())
         await self._set_number(
             self._tp1_capacity,
-            int(result.target_soc) if result.target_soc else 80,
+            int(result.target_soc) if result.target_soc is not None else 80,
         )
         await self._set_number(self._charge_current, 25)
         await self._set_number(
@@ -420,7 +430,8 @@ class DeyeController(InverterController):
     async def _set_number(self, entity_id: str | None, value: float) -> None:
         if not entity_id:
             return
-        if not self.hass.services.has_service("number", "set_value"):
+        has_service_fn = getattr(self.hass.services, "has_service", None)
+        if callable(has_service_fn) and not has_service_fn("number", "set_value"):
             if not self._number_service_missing_warned:
                 _LOGGER.warning(
                     "DeyeController: number.set_value service not available yet — skipping number write for now"

@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any
 
 
+def _round_or_none(value: float | None, digits: int) -> float | None:
+    """Round numeric values while preserving missing data."""
+    if value is None:
+        return None
+    return round(value, digits)
+
+
 class ShadowLogger:
     """Build and write structured shadow-log payloads."""
 
@@ -116,7 +123,7 @@ class ShadowLogger:
                 "load_power_w": round(data.load_power, 1),
                 "grid_power_w": round(data.grid_power, 1),
                 "battery_power_w": round(data.battery_power, 1),
-                "battery_soc_pct": round(data.battery_soc, 2),
+                "battery_soc_pct": _round_or_none(data.battery_soc, 2),
                 "price_dkk": round(data.price, 4),
             },
             "battery_context": {
@@ -125,10 +132,10 @@ class ShadowLogger:
                 "battery_max_soc": float(self._entry.data.get("battery_max_soc", 100.0)),
                 "charge_rate_kw": float(self._entry.data.get("charge_rate_kw", 6.0)),
                 "battery_cost_per_kwh": float(self._entry.data.get("battery_cost_per_kwh", 0.0)),
-                "battery_weighted_cost": round(data.battery_weighted_cost, 4),
-                "battery_solar_fraction": round(data.battery_solar_fraction, 4),
-                "battery_solar_kwh": round(data.battery_solar_kwh, 4),
-                "battery_grid_kwh": round(data.battery_grid_kwh, 4),
+                "battery_weighted_cost": _round_or_none(data.battery_weighted_cost, 4),
+                "battery_solar_fraction": _round_or_none(data.battery_solar_fraction, 4),
+                "battery_solar_kwh": _round_or_none(data.battery_solar_kwh, 4),
+                "battery_grid_kwh": _round_or_none(data.battery_grid_kwh, 4),
             },
             "learning_model": {
                 "profile_confidence": data.profile_confidence,

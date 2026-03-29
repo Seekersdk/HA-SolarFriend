@@ -22,14 +22,18 @@ class EVRuntimeController:
         ev_charger: Any,
         min_action_interval_seconds: int = 120,
         min_session_seconds: int = 300,
+        min_power_change_interval_seconds: int = 30,
     ) -> None:
         self._ev_optimizer = ev_optimizer
         self._ev_charger = ev_charger
         self._min_action_interval_seconds = min_action_interval_seconds
         self._min_session_seconds = min_session_seconds
+        self._min_power_change_interval_seconds = min_power_change_interval_seconds
         self._last_action_time: datetime | None = None
         self._charging_started_at: datetime | None = None
         self._currently_charging: bool = False
+        self._last_power_command: tuple[float, int] | None = None
+        self._last_power_command_time: datetime | None = None
         self._sync_on_startup: bool = True
         self._solar_start_candidate_since: datetime | None = None
         self._solar_stop_candidate_since: datetime | None = None
@@ -164,10 +168,30 @@ class EVRuntimeController:
         if ev_result.should_charge and not self._currently_charging:
             await self._ev_charger.resume()
             await asyncio.sleep(2)
-            await self._ev_charger.set_power(ev_result.target_w, ev_result.phases)
+            try:
+                await self._ev_charger.set_power(ev_result.target_w, ev_result.phases)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "EV: set_power fejlede efter resume; forsøger rollback med pause: %s",
+                    exc,
+                )
+                try:
+                    await self._ev_charger.pause()
+                except Exception as rollback_exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "EV: rollback pause fejlede efter delvis start; runtime efterlades som ikke-ladende: %s",
+                        rollback_exc,
+                    )
+                self._charging_started_at = None
+                self._currently_charging = False
+                self._last_power_command = None
+                self._last_power_command_time = None
+                return
             self._currently_charging = True
             self._charging_started_at = now
             self._last_action_time = now
+            self._last_power_command = (float(ev_result.target_w), int(ev_result.phases))
+            self._last_power_command_time = now
             _LOGGER.info(
                 "EV: start ladning %d-fase %.1fA (%.0fW) — %s",
                 ev_result.phases,
@@ -178,7 +202,25 @@ class EVRuntimeController:
             return
 
         if ev_result.should_charge and self._currently_charging:
+            command = (float(ev_result.target_w), int(ev_result.phases))
+            if self._last_power_command == command:
+                return
+            if self._last_power_command_time is not None:
+                power_elapsed = (now - self._last_power_command_time).total_seconds()
+                if power_elapsed < self._min_power_change_interval_seconds:
+                    _LOGGER.debug(
+                        "EV: skip power change %.0fW/%d-fase -> %.0fW/%d-fase; cooldown %ds ikke nået (%.0fs)",
+                        self._last_power_command[0] if self._last_power_command else 0.0,
+                        self._last_power_command[1] if self._last_power_command else 0,
+                        command[0],
+                        command[1],
+                        self._min_power_change_interval_seconds,
+                        power_elapsed,
+                    )
+                    return
             await self._ev_charger.set_power(ev_result.target_w, ev_result.phases)
+            self._last_power_command = command
+            self._last_power_command_time = now
             return
 
         if not ev_result.should_charge and self._currently_charging:
@@ -196,4 +238,6 @@ class EVRuntimeController:
             self._charging_started_at = None
             self._currently_charging = False
             self._last_action_time = now
+            self._last_power_command = None
+            self._last_power_command_time = None
             _LOGGER.info("EV: stop ladning — %s", ev_result.reason)

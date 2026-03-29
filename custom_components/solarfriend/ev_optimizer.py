@@ -40,7 +40,7 @@ class EVContext:
     load_power_w: float
     grid_power_w: float
     battery_charging_w: float
-    battery_soc: float
+    battery_soc: float | None
     battery_capacity_kwh: float
     battery_min_soc: float
     charger_status: str
@@ -114,29 +114,10 @@ def _parse_prices(raw_prices: list) -> list[tuple[datetime, float]]:
     return result
 
 
-def _find_cheapest_charge_hours(
-    raw_prices: list,
-    now: datetime,
-    departure: datetime,
-    n_hours: int,
-) -> set[datetime]:
-    """Return the cheapest hour starts before departure."""
-    if n_hours <= 0:
-        return set()
-
-    now_naive = _strip_tz(now)
-    dep_naive = _strip_tz(departure)
-    candidates = [
-        (dt, price)
-        for dt, price in _parse_prices(raw_prices)
-        if now_naive <= dt < dep_naive
-    ]
-    candidates.sort(key=lambda item: item[1])
-    return {dt for dt, _ in candidates[:n_hours]}
-
-
 def _battery_needs_priority(ctx: EVContext) -> bool:
     """True if battery SOC is below its minimum."""
+    if ctx.battery_soc is None:
+        return False
     return ctx.battery_soc < ctx.battery_min_soc
 
 
@@ -172,10 +153,37 @@ def _needed_kwh(ctx: EVContext) -> float:
 
 
 def _needed_charge_hours(ctx: EVContext) -> int:
-    """Return the number of full-power hours needed."""
+    """Return the number of full-power hours needed.
+
+    Kept as a small compatibility helper for tests and auxiliary callers.
+    """
     if ctx.max_charge_kw <= 0:
         return 1
     return max(1, math.ceil(_needed_kwh(ctx) / ctx.max_charge_kw))
+
+
+def _find_cheapest_charge_hours(
+    raw_prices: list,
+    now: datetime,
+    departure: datetime,
+    n_hours: int,
+) -> set[datetime]:
+    """Return the cheapest hour starts before departure.
+
+    Kept as a small compatibility helper for tests and auxiliary callers.
+    """
+    if n_hours <= 0:
+        return set()
+
+    now_naive = _strip_tz(now)
+    dep_naive = _strip_tz(departure)
+    candidates = [
+        (dt, price)
+        for dt, price in _parse_prices(raw_prices)
+        if now_naive <= dt < dep_naive
+    ]
+    candidates.sort(key=lambda item: item[1])
+    return {dt for dt, _ in candidates[:n_hours]}
 
 
 def _normalize_for_compare(dt: datetime) -> datetime:

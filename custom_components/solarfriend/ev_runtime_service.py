@@ -149,6 +149,10 @@ class EVRuntimeService:
             now=now,
             departure=departure,
         )
+        actual_charging = ev_runtime.set_currently_charging_from_actual(
+            charger_status=charger_status,
+            charger_power=charger_power,
+        )
         ctx = EVContext(
             pv_power_w=data.pv_power,
             load_power_w=data.load_power,
@@ -162,7 +166,7 @@ class EVRuntimeService:
                 entry.data.get("battery_min_soc", 10.0)
             ),
             charger_status=charger_status,
-            currently_charging=ev_runtime.currently_charging,
+            currently_charging=actual_charging,
             vehicle_soc=vehicle_soc,
             vehicle_capacity_kwh=vehicle_battery_kwh,
             vehicle_target_soc=vehicle_target_soc,
@@ -186,10 +190,6 @@ class EVRuntimeService:
         )
 
         ev_result = ev_optimizer.optimize(ctx, mode=ev_charge_mode)
-        actual_charging = ev_runtime.set_currently_charging_from_actual(
-            charger_status=charger_status,
-            charger_power=charger_power,
-        )
         if ev_charge_mode == "solar_only":
             ev_result = ev_runtime.apply_solar_only_hysteresis(
                 ctx=ctx,
@@ -231,6 +231,7 @@ class EVRuntimeService:
             inverter is not None
             and inverter.is_configured
             and optimize_result is not None
+            and data.battery_soc is not None
             and self.requires_battery_hold(
                 data=data,
                 ev_result=ev_result,

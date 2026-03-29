@@ -178,7 +178,7 @@ class SnapshotBuilder:
 
     def apply_forecast_soc_chart(self, *, data: Any, now: datetime, capacity_kwh: float, min_soc: float) -> None:
         """Build the simple forward SOC curve from hourly forecast vs profile load."""
-        current_soc = data.battery_soc or 35.0
+        current_soc = 35.0 if data.battery_soc is None else data.battery_soc
         max_soc = 100.0
         current_hour = now.hour
 

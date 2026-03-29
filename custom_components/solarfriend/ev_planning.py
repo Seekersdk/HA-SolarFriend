@@ -92,6 +92,8 @@ class EVPlanningHelper:
             except (TypeError, ValueError):
                 continue
 
+        now = self._normalize_local_datetime(now)
+        departure = self._normalize_local_datetime(departure)
         slots: list[EVHybridSlot] = []
         slot_start = now.replace(minute=0, second=0, microsecond=0)
         while slot_start < departure:
@@ -100,11 +102,13 @@ class EVPlanningHelper:
             effective_end = min(slot_end, departure)
             duration_h = (effective_end - effective_start).total_seconds() / 3600.0
             if duration_h > 0:
-                load_w = (
-                    float(data.consumption_profile_chart[slot_start.hour])
-                    if data.consumption_profile_chart
-                    else 850.0
-                )
+                load_w = 850.0
+                chart = data.consumption_profile_chart
+                if chart and len(chart) > slot_start.hour:
+                    try:
+                        load_w = float(chart[slot_start.hour])
+                    except (TypeError, ValueError):
+                        load_w = 850.0
                 pv_w = solar_by_start.get(slot_start, 0.0)
                 battery_reserved_w = battery_reserved_by_start.get(slot_start, 0.0)
                 solar_surplus_w = max(0.0, pv_w - load_w - battery_reserved_w)
@@ -271,9 +275,10 @@ class EVPlanningHelper:
 
         if ev_charge_mode == "solar_only":
             battery_max_soc = float(self._entry.data.get("battery_max_soc", 100.0))
+            current_battery_soc = data.battery_soc if data.battery_soc is not None else battery_max_soc
             battery_needed_kwh = max(
                 0.0,
-                (battery_max_soc - data.battery_soc) / 100.0
+                (battery_max_soc - current_battery_soc) / 100.0
                 * float(self._entry.data.get("battery_capacity_kwh", 10.0)),
             )
 
