@@ -19,6 +19,8 @@ _SOLCAST_POWER_NOW = "sensor.solcast_pv_forecast_power_now"
 _SOLCAST_PEAK_TIME = "sensor.solcast_pv_forecast_peak_time_today"
 _SOLCAST_PEAK_WATT = "sensor.solcast_pv_forecast_peak_forecast_today"
 
+_MAX_SLOT_KWH = 100.0  # 200 kW continuous — far beyond any residential installation
+
 
 @dataclass
 class ForecastData:
@@ -143,15 +145,42 @@ class ForecastAdapter:
                     ps = normalize_local_datetime(ps)
                 except (ValueError, TypeError):
                     continue
-                # Solcast API: pv_estimate is kW (30-min average) → kWh = kW × 0.5
+
+                # Derive slot duration from period_end if available; fall back to 30 min.
+                interval_hours = 0.5
+                pe_raw = entry.get("period_end")
+                if pe_raw is not None:
+                    try:
+                        pe = pe_raw if isinstance(pe_raw, datetime) else datetime.fromisoformat(str(pe_raw))
+                        pe = normalize_local_datetime(pe)
+                        derived = (pe - ps).total_seconds() / 3600
+                        if derived > 0:
+                            interval_hours = derived
+                    except (ValueError, TypeError):
+                        pass
+
                 kw    = float(entry.get("pv_estimate",   0.0))
                 kw10  = float(entry.get("pv_estimate10", 0.0))
                 kw90  = float(entry.get("pv_estimate90", 0.0))
+
+                def _clamp_kwh(kw_val: float) -> float:
+                    kwh = kw_val * interval_hours
+                    if kwh < 0:
+                        return 0.0
+                    if kwh > _MAX_SLOT_KWH:
+                        _LOGGER.warning(
+                            "ForecastAdapter: slot forecast %.1f kWh afskåret til %.1f kWh",
+                            kwh,
+                            _MAX_SLOT_KWH,
+                        )
+                        return _MAX_SLOT_KWH
+                    return kwh
+
                 hourly_forecast.append({
                     "period_start":      ps,
-                    "pv_estimate_kwh":   round(kw   * 0.5, 4),
-                    "pv_estimate10_kwh": round(kw10 * 0.5, 4),
-                    "pv_estimate90_kwh": round(kw90 * 0.5, 4),
+                    "pv_estimate_kwh":   round(_clamp_kwh(kw),   4),
+                    "pv_estimate10_kwh": round(_clamp_kwh(kw10), 4),
+                    "pv_estimate90_kwh": round(_clamp_kwh(kw90), 4),
                 })
 
         hourly_forecast.sort(key=lambda e: e["period_start"])

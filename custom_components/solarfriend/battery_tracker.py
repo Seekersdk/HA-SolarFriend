@@ -7,6 +7,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as ha_dt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -247,8 +248,14 @@ class BatteryTracker:
             return
 
         if tracked_total == 0:
-            self.solar_kwh = actual_total
-            _LOGGER.debug("BatteryTracker cold-start correction: %.3f kWh -> solar", actual_total)
+            # Cold-start: source unknown — use 50/50 split so savings estimates are neutral
+            # rather than optimistically assuming all energy is solar.
+            self.solar_kwh = actual_total * 0.5
+            self.grid_kwh = actual_total * 0.5
+            _LOGGER.debug(
+                "BatteryTracker cold-start: %.3f kWh split 50/50 solar/grid (source unknown)",
+                actual_total,
+            )
             return
 
         drift = abs(actual_total - tracked_total) / max(tracked_total, 0.001)
@@ -267,7 +274,7 @@ class BatteryTracker:
     def _check_midnight_reset(self) -> bool:
         """Roll today's savings into persisted totals when the date changes."""
         rolled = False
-        today = datetime.now().date().isoformat()
+        today = ha_dt.now().date().isoformat()
         if self._last_reset_date and self._last_reset_date != today:
             self.total_solar_direct_saved_dkk += self.today_solar_direct_saved_dkk
             self.total_optimizer_saved_dkk += self.today_optimizer_saved_dkk

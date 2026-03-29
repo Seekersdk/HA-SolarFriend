@@ -1,4 +1,4 @@
-"""Unit tests for passive forecast correction model."""
+"""Unit tests for season/elevation/azimuth forecast correction model."""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,7 @@ import importlib.util
 import os
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def _mock(name: str, **attrs):
@@ -22,7 +22,22 @@ if "homeassistant" not in sys.modules:
     _mock("homeassistant.core", HomeAssistant=type("HomeAssistant", (), {}))
     _mock("homeassistant.config_entries", ConfigEntry=type("ConfigEntry", (), {}))
     _mock("homeassistant.helpers")
-    _mock("homeassistant.const", Platform=type("Platform", (), {"SENSOR": "sensor", "NUMBER": "number", "SWITCH": "switch", "SELECT": "select"}))
+    _mock(
+        "homeassistant.const",
+        Platform=type(
+            "Platform",
+            (),
+            {"SENSOR": "sensor", "NUMBER": "number", "SWITCH": "switch", "SELECT": "select"},
+        ),
+    )
+    _mock("homeassistant.util")
+    _mock(
+        "homeassistant.util.dt",
+        as_local=lambda dt: dt,
+        now=datetime.now,
+        UTC=timezone.utc,
+        DEFAULT_TIME_ZONE=timezone.utc,
+    )
 
 
 class _FakeStore:
@@ -55,6 +70,8 @@ sys.modules[spec.name] = _fcm
 spec.loader.exec_module(_fcm)
 _fcm.Store = lambda hass, version, key: _store
 ForecastCorrectionModel = _fcm.ForecastCorrectionModel
+GeometryBucket = _fcm.GeometryBucket
+TemperatureBucket = _fcm.TemperatureBucket
 
 
 def run(coro):
@@ -63,10 +80,6 @@ def run(coro):
 
 def _forecast_slot(dt: datetime, kwh: float) -> dict:
     return {"period_start": dt.isoformat(), "pv_estimate_kwh": kwh}
-
-
-def _make_model() -> ForecastCorrectionModel:
-    return ForecastCorrectionModel(hass=object(), entry_id="test")
 
 
 def _weather(**overrides) -> dict:
@@ -84,36 +97,43 @@ def _weather(**overrides) -> dict:
     return snapshot
 
 
-def test_model_persists_buckets_and_partial_day_state():
+def _make_model() -> ForecastCorrectionModel:
+    _store._data = None
+    return ForecastCorrectionModel(hass=object(), entry_id="test")
+
+
+def test_model_persists_geometry_temperature_and_partial_day_state():
     model = _make_model()
-    model._buckets[3][10].factor = 0.91
-    model._buckets[3][10].samples = 7
+    model._geometry_buckets["s1|e30|a120"] = GeometryBucket(factor=0.91, samples=7, avg_abs_error_kwh=0.08)
+    model._temperature_buckets["s1|t20"] = TemperatureBucket(factor=1.04, samples=6, avg_abs_error_kwh=0.05)
     model._today_date = "2026-03-25"
     model._today_actual_kwh_by_hour = {10: 0.8}
     model._today_raw_forecast_kwh_by_hour = {10: 1.0}
+    model._today_context_by_hour = {10: {"season_bucket": 1, "solar_elevation_bucket": 30, "solar_azimuth_bucket": 120}}
     model._finalized_hours = {9}
-    model._today_sunrise = datetime(2026, 3, 25, 7, 0)
-    model._today_sunset = datetime(2026, 3, 25, 18, 0)
+    model._today_sunrise = datetime(2026, 3, 25, 7, 0, tzinfo=timezone.utc)
+    model._today_sunset = datetime(2026, 3, 25, 18, 0, tzinfo=timezone.utc)
 
     run(model.async_save())
 
-    loaded = _make_model()
+    loaded = ForecastCorrectionModel(hass=object(), entry_id="test")
     run(loaded.async_load())
 
-    assert loaded._buckets[3][10].factor == 0.91
-    assert loaded._buckets[3][10].samples == 7
+    assert loaded._geometry_buckets["s1|e30|a120"].factor == 0.91
+    assert loaded._geometry_buckets["s1|e30|a120"].samples == 7
+    assert loaded._temperature_buckets["s1|t20"].factor == 1.04
+    assert loaded._temperature_buckets["s1|t20"].samples == 6
     assert loaded._today_date == "2026-03-25"
     assert loaded._today_actual_kwh_by_hour[10] == 0.8
     assert loaded._today_raw_forecast_kwh_by_hour[10] == 1.0
+    assert loaded._today_context_by_hour[10]["solar_elevation_bucket"] == 30
     assert 9 in loaded._finalized_hours
-    assert loaded._today_sunrise == datetime(2026, 3, 25, 7, 0)
-    assert loaded._today_sunset == datetime(2026, 3, 25, 18, 0)
 
 
-def test_model_finalizes_hour_and_learns_factor_in_daylight():
+def test_model_finalizes_hour_and_learns_geometry_bucket_in_daylight():
     model = _make_model()
-    sunrise = datetime(2026, 3, 25, 8, 0)
-    sunset = datetime(2026, 3, 25, 18, 0)
+    sunrise = datetime(2026, 3, 25, 8, 0, tzinfo=timezone.utc)
+    sunset = datetime(2026, 3, 25, 18, 0, tzinfo=timezone.utc)
 
     model.update(
         now=datetime(2026, 3, 25, 10, 30),
@@ -122,7 +142,7 @@ def test_model_finalizes_hour_and_learns_factor_in_daylight():
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
         sunrise=sunrise,
         sunset=sunset,
-        weather_snapshot=_weather(),
+        weather_snapshot=_weather(temperature_c=20.0),
         solar_elevation=34.0,
         solar_azimuth=145.0,
     )
@@ -133,20 +153,21 @@ def test_model_finalizes_hour_and_learns_factor_in_daylight():
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
         sunrise=sunrise,
         sunset=sunset,
-        weather_snapshot=_weather(),
+        weather_snapshot=_weather(temperature_c=20.0),
         solar_elevation=28.0,
         solar_azimuth=160.0,
     )
 
-    bucket = model._buckets[3][10]
-    assert bucket.samples == 1
-    assert round(bucket.factor, 3) == 1.0
+    geometry_bucket = model._geometry_buckets["s1|e30|a120"]
+    assert geometry_bucket.samples == 1
+    assert round(geometry_bucket.factor, 3) == 1.0
+    assert model._temperature_buckets == {}
 
 
 def test_model_ignores_night_hours_even_if_energy_exists():
     model = _make_model()
-    sunrise = datetime(2026, 3, 25, 8, 0)
-    sunset = datetime(2026, 3, 25, 18, 0)
+    sunrise = datetime(2026, 3, 25, 8, 0, tzinfo=timezone.utc)
+    sunset = datetime(2026, 3, 25, 18, 0, tzinfo=timezone.utc)
 
     model.update(
         now=datetime(2026, 3, 25, 2, 30),
@@ -171,14 +192,14 @@ def test_model_ignores_night_hours_even_if_energy_exists():
         solar_azimuth=25.0,
     )
 
-    assert model._buckets[3][2].samples == 0
+    assert model._geometry_buckets == {}
+    assert model._temperature_buckets == {}
 
 
-def test_snapshot_reports_learning_state_after_five_buckets():
+def test_snapshot_reports_learning_state_after_five_geometry_samples():
     model = _make_model()
-    bucket = model._buckets[3][10]
-    bucket.factor = 0.8
-    bucket.samples = 5
+    model._geometry_buckets["s1|e30|a120"] = GeometryBucket(factor=0.8, samples=5, avg_abs_error_kwh=0.1)
+    model._temperature_buckets["s1|t20"] = TemperatureBucket(factor=1.0, samples=5, avg_abs_error_kwh=0.1)
 
     snapshot = model.build_snapshot(
         now=datetime(2026, 3, 25, 10, 15),
@@ -188,27 +209,29 @@ def test_snapshot_reports_learning_state_after_five_buckets():
         ],
         current_environment={
             "month": 3,
+            "season_bucket": 1,
             "solar_elevation_bucket": 30,
             "solar_azimuth_bucket": 120,
-            "cloud_coverage_bucket": 40,
+            "temperature_bucket_c": 20,
         },
     )
 
     assert snapshot.state == "learning"
-    assert snapshot.current_month == 3
+    assert snapshot.current_season == 1
     assert snapshot.active_buckets == 1
     assert snapshot.confident_buckets == 0
-    assert snapshot.current_hour_samples == 5
-    assert snapshot.current_hour_factor < 1.0
-    assert "10:00" in snapshot.today_hourly_factors
+    assert snapshot.current_geometry_samples == 5
+    assert snapshot.current_geometry_factor < 1.0
+    assert snapshot.current_temperature_samples == 5
+    assert "10:00" in snapshot.today_geometry_factors
 
 
 def test_rollover_finalizes_previous_day_with_previous_day_sun_window():
     model = _make_model()
-    previous_sunrise = datetime(2026, 3, 25, 8, 0)
-    previous_sunset = datetime(2026, 3, 25, 18, 0)
-    new_sunrise = datetime(2026, 3, 26, 11, 0)
-    new_sunset = datetime(2026, 3, 26, 12, 0)
+    previous_sunrise = datetime(2026, 3, 25, 8, 0, tzinfo=timezone.utc)
+    previous_sunset = datetime(2026, 3, 25, 18, 0, tzinfo=timezone.utc)
+    new_sunrise = datetime(2026, 3, 26, 11, 0, tzinfo=timezone.utc)
+    new_sunset = datetime(2026, 3, 26, 12, 0, tzinfo=timezone.utc)
 
     model.update(
         now=datetime(2026, 3, 25, 10, 30),
@@ -217,7 +240,7 @@ def test_rollover_finalizes_previous_day_with_previous_day_sun_window():
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
         sunrise=previous_sunrise,
         sunset=previous_sunset,
-        weather_snapshot=_weather(),
+        weather_snapshot=_weather(temperature_c=15.0),
         solar_elevation=32.0,
         solar_azimuth=150.0,
     )
@@ -229,55 +252,63 @@ def test_rollover_finalizes_previous_day_with_previous_day_sun_window():
         hourly_forecast=[],
         sunrise=new_sunrise,
         sunset=new_sunset,
-        weather_snapshot=_weather(),
+        weather_snapshot=_weather(temperature_c=5.0),
         solar_elevation=-18.0,
         solar_azimuth=300.0,
     )
 
-    bucket = model._buckets[3][10]
+    bucket = model._geometry_buckets["s1|e30|a150"]
     assert bucket.samples == 1
     assert round(bucket.factor, 3) == 1.0
 
 
-def test_model_learns_environment_context_bucket_and_exposes_snapshot():
+def test_corrected_forecast_combines_geometry_and_temperature_factors():
     model = _make_model()
-    sunrise = datetime(2026, 3, 25, 8, 0)
-    sunset = datetime(2026, 3, 25, 18, 0)
+    model._geometry_buckets["s1|e30|a120"] = GeometryBucket(factor=0.8, samples=8, avg_abs_error_kwh=0.1)
+    model._temperature_buckets["s1|t20"] = TemperatureBucket(factor=0.9, samples=8, avg_abs_error_kwh=0.1)
+    model._today_context_by_hour = {
+        10: {
+            "season_bucket": 1,
+            "solar_elevation_bucket": 30,
+            "solar_azimuth_bucket": 120,
+        }
+    }
 
-    model.update(
-        now=datetime(2026, 3, 25, 10, 30),
-        pv_power_w=800.0,
-        dt_seconds=3600.0,
+    corrected = model.get_corrected_hourly_forecast(
+        now=datetime(2026, 3, 25, 10, 15),
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
-        sunrise=sunrise,
-        sunset=sunset,
-        weather_snapshot=_weather(cloud_coverage_pct=45.0, temperature_c=21.0),
-        solar_elevation=33.0,
-        solar_azimuth=141.0,
+        hourly_weather_forecast=[
+            {"datetime": datetime(2026, 3, 25, 10, 0).isoformat(), "temperature": 20.0},
+        ],
     )
-    model.update(
-        now=datetime(2026, 3, 25, 11, 1),
-        pv_power_w=0.0,
-        dt_seconds=0.0,
-        hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
-        sunrise=sunrise,
-        sunset=sunset,
-        weather_snapshot=_weather(cloud_coverage_pct=50.0, temperature_c=20.0),
-        solar_elevation=28.0,
-        solar_azimuth=165.0,
-    )
+
+    assert len(corrected) == 1
+    assert round(corrected[0]["pv_estimate_kwh"], 4) < 1.0
+    assert round(corrected[0]["pv_estimate_kwh"], 4) == round(0.8667 * 0.9333, 4)
+
+
+def test_build_snapshot_exposes_temperature_diagnostics():
+    model = _make_model()
+    model._geometry_buckets["s1|e30|a120"] = GeometryBucket(factor=0.8, samples=8, avg_abs_error_kwh=0.1)
+    model._temperature_buckets["s1|t20"] = TemperatureBucket(factor=0.9, samples=8, avg_abs_error_kwh=0.1)
 
     snapshot = model.build_snapshot(
-        now=datetime(2026, 3, 25, 10, 45),
+        now=datetime(2026, 3, 25, 10, 15),
         hourly_forecast=[_forecast_slot(datetime(2026, 3, 25, 10, 0), 1.0)],
         current_environment={
             "month": 3,
+            "season_bucket": 1,
             "solar_elevation_bucket": 30,
             "solar_azimuth_bucket": 120,
-            "cloud_coverage_bucket": 40,
+            "temperature_bucket_c": 20,
         },
+        hourly_weather_forecast=[
+            {"datetime": datetime(2026, 3, 25, 10, 0).isoformat(), "temperature": 20.0},
+        ],
     )
 
-    assert model._context_buckets["m3|e30|a120|c40"].samples == 1
-    assert snapshot.current_context_key == "m3|e30|a120|c40"
-    assert snapshot.last_environment["solar_elevation_bucket"] == 30
+    assert snapshot.current_geometry_key == "s1|e30|a120"
+    assert snapshot.current_temperature_key == "s1|t20"
+    assert snapshot.current_temperature_samples == 8
+    assert snapshot.today_geometry_factors["10:00"]["temperature_bucket_c"] == 20
+    assert snapshot.today_geometry_factors["10:00"]["temperature_samples"] == 8

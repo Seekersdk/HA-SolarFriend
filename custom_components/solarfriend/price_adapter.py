@@ -5,11 +5,17 @@ integration can work against a stable in-memory snapshot.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.util import dt as ha_dt
+
+_LOGGER = logging.getLogger(__name__)
+
+_PRICE_MIN_DKK = -10.0  # Negative spot prices do occur (wind overproduction)
+_PRICE_MAX_DKK = 50.0   # Far above any realistic Danish spot price
 
 
 def _to_local_aware(dt: datetime) -> datetime:
@@ -149,6 +155,15 @@ class PriceAdapter:
             try:
                 price = float(raw_price)
             except (TypeError, ValueError):
+                continue
+            if price < _PRICE_MIN_DKK or price > _PRICE_MAX_DKK:
+                _LOGGER.warning(
+                    "PriceAdapter: pris %.4f DKK/kWh er uden for forventet interval "
+                    "[%.1f, %.1f] — springes over",
+                    price,
+                    _PRICE_MIN_DKK,
+                    _PRICE_MAX_DKK,
+                )
                 continue
             points.append(PricePoint(start=start, end=start + timedelta(hours=1), price=price))
             previous_start = start

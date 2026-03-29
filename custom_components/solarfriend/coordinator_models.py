@@ -97,19 +97,18 @@ class SolarFriendData:
     forecast_correction_valid: bool = False
     forecast_history_14d: list[dict[str, Any]] = field(default_factory=list)
     forecast_correction_model_state: str = "inactive"
-    forecast_correction_current_month: int = 0
+    forecast_correction_current_season: int = 0
     forecast_correction_active_buckets: int = 0
     forecast_correction_confident_buckets: int = 0
-    forecast_correction_average_factor_this_month: float = 1.0
-    forecast_correction_today_hourly_factors: dict[str, Any] = field(default_factory=dict)
-    forecast_correction_today_contextual_factors: dict[str, Any] = field(default_factory=dict)
-    forecast_correction_current_hour_factor: float = 1.0
-    forecast_correction_current_hour_samples: int = 0
-    forecast_correction_active_context_buckets: int = 0
-    forecast_correction_confident_context_buckets: int = 0
-    forecast_correction_current_context_factor: float = 1.0
-    forecast_correction_current_context_samples: int = 0
-    forecast_correction_current_context_key: str = ""
+    forecast_correction_average_factor_this_season: float = 1.0
+    forecast_correction_today_geometry_factors: dict[str, Any] = field(default_factory=dict)
+    forecast_correction_current_total_factor: float = 1.0
+    forecast_correction_current_geometry_factor: float = 1.0
+    forecast_correction_current_geometry_samples: int = 0
+    forecast_correction_current_geometry_key: str = ""
+    forecast_correction_current_temperature_factor: float = 1.0
+    forecast_correction_current_temperature_samples: int = 0
+    forecast_correction_current_temperature_key: str = ""
     forecast_correction_raw_vs_corrected_delta_today: float = 0.0
     forecast_correction_last_environment: dict[str, Any] = field(default_factory=dict)
     unavailable: list[str] = field(default_factory=list)
@@ -130,6 +129,20 @@ class SolarFriendData:
     ev_emergency_charging: bool = False
     ev_min_soc_from_range: float = 0.0
     ev_plan: list[Any] = field(default_factory=list)
+
+    # Solar installation profile — Track 2 (response surface + annual projection)
+    solar_profile_state: str = "inactive"
+    solar_profile_populated_cells: int = 0
+    solar_profile_confident_cells: int = 0
+    solar_profile_astronomical_coverage_pct: float = 0.0
+    solar_profile_annual_paths_total: int = 0
+    solar_profile_annual_paths_covered: int = 0
+    solar_profile_annual_paths_missing: int = 0
+    solar_profile_clear_sky_observations: int = 0
+    solar_profile_estimated_hours_to_ready: float = 0.0
+    solar_profile_response_surface: dict[str, float] = field(default_factory=dict)
+    solar_profile_comparison_today: list[dict[str, Any]] = field(default_factory=list)
+    solar_profile_comparison_tomorrow: list[dict[str, Any]] = field(default_factory=list)
 
 
 def ev_device_info(coordinator: Any) -> DeviceInfo:

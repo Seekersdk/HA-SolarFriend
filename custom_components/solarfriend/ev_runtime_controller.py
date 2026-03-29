@@ -21,11 +21,14 @@ class EVRuntimeController:
         ev_optimizer: Any,
         ev_charger: Any,
         min_action_interval_seconds: int = 120,
+        min_session_seconds: int = 300,
     ) -> None:
         self._ev_optimizer = ev_optimizer
         self._ev_charger = ev_charger
         self._min_action_interval_seconds = min_action_interval_seconds
+        self._min_session_seconds = min_session_seconds
         self._last_action_time: datetime | None = None
+        self._charging_started_at: datetime | None = None
         self._currently_charging: bool = False
         self._sync_on_startup: bool = True
         self._solar_start_candidate_since: datetime | None = None
@@ -163,6 +166,7 @@ class EVRuntimeController:
             await asyncio.sleep(2)
             await self._ev_charger.set_power(ev_result.target_w, ev_result.phases)
             self._currently_charging = True
+            self._charging_started_at = now
             self._last_action_time = now
             _LOGGER.info(
                 "EV: start ladning %d-fase %.1fA (%.0fW) — %s",
@@ -178,7 +182,18 @@ class EVRuntimeController:
             return
 
         if not ev_result.should_charge and self._currently_charging:
+            if self._charging_started_at is not None:
+                session_elapsed = (now - self._charging_started_at).total_seconds()
+                if session_elapsed < self._min_session_seconds:
+                    _LOGGER.debug(
+                        "EV: min session %ds ikke nået (%.0fs) — skip stop: %s",
+                        self._min_session_seconds,
+                        session_elapsed,
+                        ev_result.reason,
+                    )
+                    return
             await self._ev_charger.pause()
+            self._charging_started_at = None
             self._currently_charging = False
             self._last_action_time = now
             _LOGGER.info("EV: stop ladning — %s", ev_result.reason)

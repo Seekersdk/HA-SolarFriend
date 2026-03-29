@@ -67,8 +67,12 @@ class SolarFriendStateReader:
         total_load_w: float,
         *,
         ev_power_w: float = 0.0,
+        ev_power_available: bool = True,
     ) -> float:
         """Return house-only load when the configured load sensor is total site load."""
         if not self.load_sensor_is_total_load():
+            return max(0.0, total_load_w)
+        if not ev_power_available:
+            # EV power unknown — don't subtract to avoid underestimating house load.
             return max(0.0, total_load_w)
         return max(0.0, total_load_w - ev_power_w)

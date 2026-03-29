@@ -268,7 +268,7 @@ class BatteryOptimizer:
             for slot in slots
         ]
 
-        @lru_cache(maxsize=None)
+        @lru_cache(maxsize=16384)
         def _solve(slot_idx: int, stored_units: int) -> tuple[float, tuple[tuple[int, int], ...]]:
             if slot_idx >= len(slots):
                 return 0.0, ()

@@ -77,6 +77,9 @@ class SnapshotBuilder:
         weather_snapshot: dict[str, Any],
         solar_elevation: float | None,
         solar_azimuth: float | None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        hourly_weather_forecast: list[dict[str, Any]] | None = None,
     ) -> None:
         """Project passive forecast-correction diagnostics into the snapshot."""
         if correction_model is None:
@@ -90,21 +93,29 @@ class SnapshotBuilder:
                 "solar_elevation": solar_elevation,
                 "solar_azimuth": solar_azimuth,
             },
+            latitude=latitude,
+            longitude=longitude,
+            hourly_weather_forecast=hourly_weather_forecast,
         )
         data.forecast_correction_model_state = correction_snapshot.state
-        data.forecast_correction_current_month = correction_snapshot.current_month
+        data.forecast_correction_current_season = correction_snapshot.current_season
         data.forecast_correction_active_buckets = correction_snapshot.active_buckets
         data.forecast_correction_confident_buckets = correction_snapshot.confident_buckets
-        data.forecast_correction_average_factor_this_month = correction_snapshot.average_factor_this_month
-        data.forecast_correction_today_hourly_factors = correction_snapshot.today_hourly_factors
-        data.forecast_correction_today_contextual_factors = correction_snapshot.today_contextual_factors
-        data.forecast_correction_current_hour_factor = correction_snapshot.current_hour_factor
-        data.forecast_correction_current_hour_samples = correction_snapshot.current_hour_samples
-        data.forecast_correction_active_context_buckets = correction_snapshot.active_context_buckets
-        data.forecast_correction_confident_context_buckets = correction_snapshot.confident_context_buckets
-        data.forecast_correction_current_context_factor = correction_snapshot.current_context_factor
-        data.forecast_correction_current_context_samples = correction_snapshot.current_context_samples
-        data.forecast_correction_current_context_key = correction_snapshot.current_context_key
+        data.forecast_correction_average_factor_this_season = (
+            correction_snapshot.average_factor_this_season
+        )
+        data.forecast_correction_today_geometry_factors = correction_snapshot.today_geometry_factors
+        data.forecast_correction_current_total_factor = correction_snapshot.current_total_factor
+        data.forecast_correction_current_geometry_factor = correction_snapshot.current_geometry_factor
+        data.forecast_correction_current_geometry_samples = correction_snapshot.current_geometry_samples
+        data.forecast_correction_current_geometry_key = correction_snapshot.current_geometry_key
+        data.forecast_correction_current_temperature_factor = (
+            correction_snapshot.current_temperature_factor
+        )
+        data.forecast_correction_current_temperature_samples = (
+            correction_snapshot.current_temperature_samples
+        )
+        data.forecast_correction_current_temperature_key = correction_snapshot.current_temperature_key
         data.forecast_correction_raw_vs_corrected_delta_today = (
             correction_snapshot.raw_vs_corrected_delta_today
         )
@@ -198,6 +209,40 @@ class SnapshotBuilder:
         data.advanced_consumption_model_today_hourly_prediction = snapshot.today_hourly_prediction
         data.advanced_consumption_model_recent_daily_totals = snapshot.recent_daily_totals
         data.advanced_consumption_model_last_weather = snapshot.last_weather_snapshot
+
+    def apply_solar_installation_profile(
+        self,
+        *,
+        data: Any,
+        now: datetime,
+        profile: Any | None,
+        latitude: float,
+        longitude: float,
+        raw_hourly_forecast: list[dict],
+        empirical_hourly_forecast: list[dict] | None = None,
+    ) -> None:
+        """Project solar installation profile (Track 2) into the snapshot."""
+        if profile is None:
+            return
+        snapshot = profile.build_snapshot(
+            now=now,
+            latitude=latitude,
+            longitude=longitude,
+            raw_hourly_forecast=raw_hourly_forecast,
+            empirical_hourly_forecast=empirical_hourly_forecast or [],
+        )
+        data.solar_profile_state = snapshot.state
+        data.solar_profile_populated_cells = snapshot.populated_cells
+        data.solar_profile_confident_cells = snapshot.confident_cells
+        data.solar_profile_astronomical_coverage_pct = snapshot.astronomical_coverage_pct
+        data.solar_profile_annual_paths_total = snapshot.annual_paths_total
+        data.solar_profile_annual_paths_covered = snapshot.annual_paths_covered
+        data.solar_profile_annual_paths_missing = snapshot.annual_paths_missing
+        data.solar_profile_clear_sky_observations = snapshot.clear_sky_observations
+        data.solar_profile_estimated_hours_to_ready = snapshot.estimated_hours_to_ready
+        data.solar_profile_response_surface = snapshot.response_surface
+        data.solar_profile_comparison_today = snapshot.comparison_today
+        data.solar_profile_comparison_tomorrow = snapshot.comparison_tomorrow
 
     def apply_profile_debug(self, *, data: Any, profile: Any) -> None:
         """Project profile confidence/debug fields into the snapshot."""

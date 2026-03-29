@@ -107,23 +107,39 @@ def _forecast_accuracy_14d_attrs(d: "SolarFriendData", cfg: dict) -> dict:
 
 
 def _forecast_correction_model_attrs(d: "SolarFriendData", cfg: dict) -> dict:
-    """Expose passive month/hour forecast correction model diagnostics."""
+    """Expose passive season/elevation/azimuth forecast correction diagnostics."""
     return {
-        "current_month": d.forecast_correction_current_month,
+        "current_season": d.forecast_correction_current_season,
         "active_buckets": d.forecast_correction_active_buckets,
         "confident_buckets": d.forecast_correction_confident_buckets,
-        "active_context_buckets": d.forecast_correction_active_context_buckets,
-        "confident_context_buckets": d.forecast_correction_confident_context_buckets,
-        "average_factor_this_month": d.forecast_correction_average_factor_this_month,
-        "today_hourly_factors": d.forecast_correction_today_hourly_factors,
-        "today_contextual_factors": d.forecast_correction_today_contextual_factors,
-        "current_hour_factor": d.forecast_correction_current_hour_factor,
-        "current_hour_samples": d.forecast_correction_current_hour_samples,
-        "current_context_factor": d.forecast_correction_current_context_factor,
-        "current_context_samples": d.forecast_correction_current_context_samples,
-        "current_context_key": d.forecast_correction_current_context_key,
+        "average_factor_this_season": d.forecast_correction_average_factor_this_season,
+        "today_geometry_factors": d.forecast_correction_today_geometry_factors,
+        "current_total_factor": d.forecast_correction_current_total_factor,
+        "current_geometry_factor": d.forecast_correction_current_geometry_factor,
+        "current_geometry_samples": d.forecast_correction_current_geometry_samples,
+        "current_geometry_key": d.forecast_correction_current_geometry_key,
+        "current_temperature_factor": d.forecast_correction_current_temperature_factor,
+        "current_temperature_samples": d.forecast_correction_current_temperature_samples,
+        "current_temperature_key": d.forecast_correction_current_temperature_key,
         "raw_vs_corrected_delta_today": d.forecast_correction_raw_vs_corrected_delta_today,
         "last_environment": d.forecast_correction_last_environment,
+    }
+
+
+def _solar_installation_profile_attrs(d: "SolarFriendData", cfg: dict) -> dict:
+    """Expose solar installation profile diagnostics and comparison data for graphs."""
+    return {
+        "populated_cells": d.solar_profile_populated_cells,
+        "confident_cells": d.solar_profile_confident_cells,
+        "astronomical_coverage_pct": d.solar_profile_astronomical_coverage_pct,
+        "annual_paths_total": d.solar_profile_annual_paths_total,
+        "annual_paths_covered": d.solar_profile_annual_paths_covered,
+        "annual_paths_missing": d.solar_profile_annual_paths_missing,
+        "clear_sky_observations": d.solar_profile_clear_sky_observations,
+        "estimated_hours_to_ready": d.solar_profile_estimated_hours_to_ready,
+        "response_surface": d.solar_profile_response_surface,
+        "comparison_today": d.solar_profile_comparison_today,
+        "comparison_tomorrow": d.solar_profile_comparison_tomorrow,
     }
 
 
@@ -720,6 +736,34 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         extra_attrs_fn=lambda d, cfg: _forecast_accuracy_14d_attrs(d, cfg),
     ),
     SolarFriendSensorDescription(
+        key="solar_installation_profile",
+        name="Solar Installation Profile",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=None,
+        icon="mdi:solar-panel",
+        value_fn=lambda d, _: d.solar_profile_state,
+        extra_attrs_fn=lambda d, cfg: _solar_installation_profile_attrs(d, cfg),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_hours_to_ready",
+        name="Solar Profile Hours To Ready",
+        native_unit_of_measurement="h",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:timer-sand",
+        value_fn=lambda d, _: round(d.solar_profile_estimated_hours_to_ready, 1),
+    ),
+    SolarFriendSensorDescription(
+        key="solar_profile_missing_annual_paths",
+        name="Solar Profile Missing Annual Paths",
+        native_unit_of_measurement="paths",
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:vector-polyline-minus",
+        value_fn=lambda d, _: d.solar_profile_annual_paths_missing,
+    ),
+    SolarFriendSensorDescription(
         key="forecast_correction_model",
         name="Forecast Correction Model",
         native_unit_of_measurement=None,
@@ -730,22 +774,31 @@ SENSOR_DESCRIPTIONS: tuple[SolarFriendSensorDescription, ...] = (
         extra_attrs_fn=lambda d, cfg: _forecast_correction_model_attrs(d, cfg),
     ),
     SolarFriendSensorDescription(
-        key="forecast_correction_context_factor",
-        name="Forecast Correction Context Factor",
+        key="forecast_correction_total_factor",
+        name="Forecast Correction Total Factor",
         native_unit_of_measurement=None,
         device_class=None,
         state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:weather-partly-cloudy",
-        value_fn=lambda d, _: round(d.forecast_correction_current_context_factor, 4),
+        icon="mdi:multiplication",
+        value_fn=lambda d, _: round(d.forecast_correction_current_total_factor, 4),
     ),
     SolarFriendSensorDescription(
-        key="forecast_correction_context_samples",
-        name="Forecast Correction Context Samples",
-        native_unit_of_measurement="samples",
+        key="forecast_correction_geometry_factor",
+        name="Forecast Correction Geometry Factor",
+        native_unit_of_measurement=None,
         device_class=None,
         state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:counter",
-        value_fn=lambda d, _: d.forecast_correction_current_context_samples,
+        icon="mdi:solar-power-variant",
+        value_fn=lambda d, _: round(d.forecast_correction_current_geometry_factor, 4),
+    ),
+    SolarFriendSensorDescription(
+        key="forecast_correction_temperature_factor",
+        name="Forecast Correction Temperature Factor",
+        native_unit_of_measurement=None,
+        device_class=None,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer",
+        value_fn=lambda d, _: round(d.forecast_correction_current_temperature_factor, 4),
     ),
     # --- Forecast SOC chart ---
     # apexcharts-card data_generator example:
