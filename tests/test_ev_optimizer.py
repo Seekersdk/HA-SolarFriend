@@ -241,7 +241,7 @@ def test_surplus_w_no_battery():
 
 def test_surplus_w_battery_charging():
     ctx = make_ctx(pv_power_w=4000.0, load_power_w=1000.0, battery_charging_w=-2000.0)
-    assert _surplus_w(ctx) == 3000.0
+    assert _surplus_w(ctx) == 1000.0
 
 
 def test_surplus_w_battery_discharging():
@@ -257,8 +257,19 @@ def test_surplus_excludes_battery_discharge():
 
 
 def test_surplus_excludes_battery_charging():
-    # Battery charging is not subtracted unless reclaim is explicitly enabled.
+    # Battery charging consumes solar unless an active EV solar slot can reclaim it.
     ctx = make_ctx(pv_power_w=3000.0, load_power_w=1000.0, battery_charging_w=-500.0)
+    assert _surplus_w(ctx) == pytest.approx(1500.0, abs=1)
+
+
+def test_surplus_reclaims_battery_charging_only_in_active_ev_slot():
+    ctx = make_ctx(
+        pv_power_w=3000.0,
+        load_power_w=1000.0,
+        battery_charging_w=-500.0,
+        allow_battery_charge_reclaim=True,
+        grid_power_w=0.0,
+    )
     assert _surplus_w(ctx) == pytest.approx(2000.0, abs=1)
 
 
@@ -372,10 +383,10 @@ def test_solar_only_capped_by_max_charge_kw():
 
 
 def test_solar_only_battery_priority():
-    # Battery charging is ignored in surplus unless runtime reclaim is enabled.
+    # Solar-only EV must leave room for ongoing battery charging by default.
     result = opt(pv_power_w=4000, load_power_w=1000, battery_charging_w=-2000)
-    assert result.should_charge is True
-    assert result.surplus_w == 3000.0
+    assert result.should_charge is False
+    assert result.surplus_w == 1000.0
 
 
 def test_solar_only_hysteresis_stop():
@@ -488,7 +499,7 @@ def test_solar_only_surplus_can_be_negative():
         load_power_w=2000.0,
         battery_charging_w=-1000.0,
     )
-    assert result.surplus_w == pytest.approx(-1500.0, abs=1)
+    assert result.surplus_w == pytest.approx(-2500.0, abs=1)
     assert result.should_charge is False
 
 
@@ -503,9 +514,9 @@ def test_solar_only_surplus_treats_charge_and_discharge_differently():
         load_power_w=1000.0,
         battery_charging_w=1500.0,
     )
-    assert charging.surplus_w == pytest.approx(4000.0, abs=1)
+    assert charging.surplus_w == pytest.approx(2500.0, abs=1)
     assert discharging.surplus_w == pytest.approx(2500.0, abs=1)
-    assert charging.target_w > discharging.target_w
+    assert charging.target_w == pytest.approx(discharging.target_w, abs=1)
 
 
 def test_solar_only_uses_surplus_strength_for_one_phase_amps():

@@ -143,9 +143,9 @@ def _battery_needs_priority(ctx: EVContext) -> bool:
 def _surplus_w(ctx: EVContext) -> float:
     """Return solar power that could be made available to the EV.
 
-    If the house battery is currently charging while the site is not importing
-    meaningful power, that charging load is treated as flexible only inside an
-    active EV charging slot and can be redirected to the car.
+    Battery charging consumes available solar unless an active EV solar slot is
+    explicitly allowed to reclaim that charging power. Battery discharge is
+    always excluded so the EV never rides on house-battery output.
     """
     battery_load_w = max(0.0, -ctx.battery_charging_w)
     battery_discharge_w = max(0.0, ctx.battery_charging_w)
@@ -157,6 +157,7 @@ def _surplus_w(ctx: EVContext) -> float:
     return (
         ctx.pv_power_w
         - ctx.load_power_w
+        - battery_load_w
         - battery_discharge_w
         + reclaimable_battery_charge_w
     )
