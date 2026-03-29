@@ -765,6 +765,32 @@ def test_no_sell_battery_after_noon_without_prices_beyond_midnight():
     assert all(float(slot["battery_export_w"]) == 0.0 for slot in plan), plan
 
 
+def test_morning_plan_still_blocks_evening_export_without_tomorrow_prices():
+    """A plan built in the morning must not schedule export in evening slots without raw_tomorrow prices."""
+    now = datetime(2026, 3, 22, 4, 0, 0)
+    prices = _explicit_prices(
+        now,
+        [1.20, 1.10, 1.05, 1.00, 0.95, 0.90, 0.85, 0.80, 1.80, 1.70, 1.60, 1.50, 1.40, 1.30],
+    )
+    sell_prices = _explicit_prices(
+        now,
+        [0.80, 0.75, 0.72, 0.70, 0.68, 0.65, 0.60, 0.58, 0.55, 0.52, 0.48, 0.40, 0.35, 0.30],
+    )
+
+    _, plan = run_with_plan(
+        now,
+        soc=100.0,
+        prices=prices,
+        sell_prices=sell_prices,
+        forecast=None,
+        profile=_ScheduledProfile(default_watt=0.0),
+    )
+
+    evening_slots = [slot for slot in plan if int(slot["hour_str"][:2]) >= 12]
+    assert evening_slots, plan
+    assert all(float(slot["battery_export_w"]) == 0.0 for slot in evening_slots), evening_slots
+
+
 def test_horizon_skips_battery_use_during_cheap_morning():
     """Cheap morning slots should be served from grid when better discharge value exists later."""
     now = datetime(2026, 3, 22, 23, 0, 0)

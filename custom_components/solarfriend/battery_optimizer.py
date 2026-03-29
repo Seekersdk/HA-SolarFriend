@@ -228,7 +228,7 @@ class BatteryOptimizer:
         raw_prices: list[dict[str, Any]],
         weighted_cost: float,
         hourly_forecast: list | None,
-        allow_battery_export: bool = True,
+        has_tomorrow_prices: bool = True,
         reserved_solar_kwh: dict[datetime, float] | None = None,
         raw_sell_prices: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
@@ -316,7 +316,8 @@ class BatteryOptimizer:
                 for charge_units in charge_range:
                     discharge_to_load_units = min(net_load_units[slot_idx], discharge_units)
                     export_units = max(0, discharge_units - discharge_to_load_units)
-                    if not allow_battery_export and export_units > 0:
+                    slot_export_allowed = has_tomorrow_prices or slots[slot_idx]["start"].hour < 12
+                    if not slot_export_allowed and export_units > 0:
                         continue
                     if solar_stored_units > 0 and export_units > 0:
                         continue
@@ -362,7 +363,8 @@ class BatteryOptimizer:
             )
             discharge_to_load_kwh = min(slot["net_load_kwh"], discharge_total_kwh)
             battery_export_kwh = max(0.0, discharge_total_kwh - discharge_to_load_kwh)
-            if not allow_battery_export and battery_export_kwh > 0:
+            slot_export_allowed = has_tomorrow_prices or slot["start"].hour < 12
+            if not slot_export_allowed and battery_export_kwh > 0:
                 stored_kwh += battery_export_kwh
                 discharge_total_kwh = discharge_to_load_kwh
                 battery_export_kwh = 0.0
@@ -507,10 +509,7 @@ class BatteryOptimizer:
             if sell_prices
             else current_price
         ) or current_price
-        allow_battery_export = (
-            now.hour < 12
-            or self._has_prices_beyond_next_midnight(raw_prices, now)
-        )
+        has_tomorrow_prices = self._has_prices_beyond_next_midnight(raw_prices, now)
 
         if current_price < 0:
             self._last_plan = self._build_horizon_plan(
@@ -519,7 +518,7 @@ class BatteryOptimizer:
                 raw_prices=raw_prices,
                 weighted_cost=weighted_cost,
                 hourly_forecast=hourly_forecast,
-                allow_battery_export=allow_battery_export,
+                has_tomorrow_prices=has_tomorrow_prices,
                 reserved_solar_kwh=reserved_solar_kwh,
                 raw_sell_prices=sell_prices,
             )
@@ -548,7 +547,7 @@ class BatteryOptimizer:
                 raw_prices=raw_prices,
                 weighted_cost=weighted_cost,
                 hourly_forecast=hourly_forecast,
-                allow_battery_export=allow_battery_export,
+                has_tomorrow_prices=has_tomorrow_prices,
                 reserved_solar_kwh=reserved_solar_kwh,
                 raw_sell_prices=sell_prices,
             )
@@ -588,7 +587,7 @@ class BatteryOptimizer:
             raw_prices=raw_prices,
             weighted_cost=weighted_cost,
             hourly_forecast=hourly_forecast,
-            allow_battery_export=allow_battery_export,
+            has_tomorrow_prices=has_tomorrow_prices,
             reserved_solar_kwh=reserved_solar_kwh,
             raw_sell_prices=sell_prices,
         )

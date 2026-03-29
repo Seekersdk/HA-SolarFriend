@@ -42,3 +42,6 @@ dev/
 
 # Local dashboards
 dashboards/
+
+# Local AI session memory
+AI_LOG.md
