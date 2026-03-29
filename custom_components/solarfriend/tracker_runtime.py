@@ -22,6 +22,10 @@ class TrackerRuntimeState:
     last_soc_correction: datetime | None = None
     battery_sign_warned: bool = False
     last_plan_deviation_key: str | None = None
+    unauthorized_battery_grid_charge_started_at: datetime | None = None
+    unauthorized_battery_grid_charge_reported: bool = False
+    ev_battery_grid_conflict_started_at: datetime | None = None
+    ev_battery_grid_conflict_reported: bool = False
 
 
 class TrackerRuntime:
@@ -245,4 +249,87 @@ class TrackerRuntime:
             battery_power,
             current_slot["hour_str"],
         )
+        return True
+
+    def detect_unexpected_grid_events(
+        self,
+        *,
+        now: datetime,
+        strategy: str | None,
+        grid_power: float,
+        battery_power: float,
+        pv_power: float,
+        load_power: float,
+        ev_charge_mode: str,
+        ev_charging_power: float,
+    ) -> list[str]:
+        """Return newly-triggered unexpected grid/battery events."""
+        events: list[str] = []
+        authorized_grid_strategies = {"CHARGE_GRID", "CHARGE_NIGHT", "NEGATIVE_IMPORT"}
+        strategy_name = (strategy or "").upper()
+        grid_importing = grid_power >= self._policy.unexpected_grid_import_w
+        battery_charging = battery_power <= -self._policy.unexpected_battery_charge_w
+        unauthorized_battery_grid_charge = (
+            grid_importing
+            and battery_charging
+            and strategy_name not in authorized_grid_strategies
+        )
+        if self._advance_timer(
+            active=unauthorized_battery_grid_charge,
+            now=now,
+            started_attr="unauthorized_battery_grid_charge_started_at",
+            reported_attr="unauthorized_battery_grid_charge_reported",
+            duration=self._policy.unexpected_battery_grid_charge_duration,
+        ):
+            events.append("unauthorized_battery_grid_charge")
+
+        total_demand_w = load_power + ev_charging_power + abs(min(0.0, battery_power))
+        solar_shortfall = pv_power + self._policy.unexpected_grid_solar_margin_w < total_demand_w
+        ev_battery_grid_conflict = (
+            ev_charge_mode == "solar_only"
+            and ev_charging_power >= self._policy.ev_active_charge_w
+            and battery_charging
+            and grid_importing
+            and strategy_name not in authorized_grid_strategies
+            and solar_shortfall
+        )
+        if self._advance_timer(
+            active=ev_battery_grid_conflict,
+            now=now,
+            started_attr="ev_battery_grid_conflict_started_at",
+            reported_attr="ev_battery_grid_conflict_reported",
+            duration=self._policy.unexpected_ev_grid_conflict_duration,
+        ):
+            events.append("ev_battery_grid_conflict")
+
+        return events
+
+    def _advance_timer(
+        self,
+        *,
+        active: bool,
+        now: datetime,
+        started_attr: str,
+        reported_attr: str,
+        duration: timedelta,
+    ) -> bool:
+        """Track a timed condition and return True on the first threshold crossing."""
+        if not active:
+            setattr(self._state, started_attr, None)
+            setattr(self._state, reported_attr, False)
+            return False
+
+        started_at = getattr(self._state, started_attr)
+        if started_at is None:
+            setattr(self._state, started_attr, now)
+            setattr(self._state, reported_attr, False)
+            return False
+
+        if getattr(self._state, reported_attr):
+            return False
+
+        if (now - started_at) < duration:
+            return False
+
+        setattr(self._state, reported_attr, True)
         return True

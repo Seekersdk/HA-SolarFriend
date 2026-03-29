@@ -15,6 +15,7 @@ import types
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from unittest.mock import AsyncMock
 
 
 def _mock(name: str, **attrs):
@@ -247,6 +248,7 @@ init_mod = importlib.import_module("custom_components.solarfriend")  # noqa: E40
 from custom_components.solarfriend.battery_tracker import BatteryTracker  # noqa: E402
 from custom_components.solarfriend.advanced_consumption_model import AdvancedConsumptionModel  # noqa: E402
 from custom_components.solarfriend.coordinator import SolarFriendCoordinator  # noqa: E402
+from custom_components.solarfriend.coordinator_models import SolarFriendData  # noqa: E402
 from custom_components.solarfriend.coordinator_policy import DEFAULT_COORDINATOR_POLICY  # noqa: E402
 from custom_components.solarfriend.forecast_correction_model import ForecastCorrectionModel  # noqa: E402
 from custom_components.solarfriend.price_adapter import PriceData  # noqa: E402
@@ -972,6 +974,184 @@ def test_tracker_runtime_tracks_battery_sell_value_from_discharge_power():
     )
 
     assert sell_calls == [(1500.0, 0.9, 300.0)]
+
+
+def test_tracker_runtime_detects_unauthorized_battery_grid_charge_after_one_minute():
+    runtime = TrackerRuntime(DEFAULT_COORDINATOR_POLICY, config_entry=_make_entry())
+    now = datetime(2026, 3, 27, 12, 0, 0)
+
+    first = runtime.detect_unexpected_grid_events(
+        now=now,
+        strategy="SAVE_SOLAR",
+        grid_power=1200.0,
+        battery_power=-1500.0,
+        pv_power=1800.0,
+        load_power=600.0,
+        ev_charge_mode="solar_only",
+        ev_charging_power=0.0,
+    )
+    second = runtime.detect_unexpected_grid_events(
+        now=now + timedelta(seconds=30),
+        strategy="SAVE_SOLAR",
+        grid_power=1200.0,
+        battery_power=-1500.0,
+        pv_power=1800.0,
+        load_power=600.0,
+        ev_charge_mode="solar_only",
+        ev_charging_power=0.0,
+    )
+    third = runtime.detect_unexpected_grid_events(
+        now=now + timedelta(minutes=1),
+        strategy="SAVE_SOLAR",
+        grid_power=1200.0,
+        battery_power=-1500.0,
+        pv_power=1800.0,
+        load_power=600.0,
+        ev_charge_mode="solar_only",
+        ev_charging_power=0.0,
+    )
+
+    assert first == []
+    assert second == []
+    assert third == ["unauthorized_battery_grid_charge"]
+
+
+def test_tracker_runtime_ignores_unauthorized_battery_grid_charge_in_negative_import():
+    runtime = TrackerRuntime(DEFAULT_COORDINATOR_POLICY, config_entry=_make_entry())
+
+    events = runtime.detect_unexpected_grid_events(
+        now=datetime(2026, 3, 27, 12, 5, 0),
+        strategy="NEGATIVE_IMPORT",
+        grid_power=1500.0,
+        battery_power=-1800.0,
+        pv_power=0.0,
+        load_power=400.0,
+        ev_charge_mode="solar_only",
+        ev_charging_power=0.0,
+    )
+
+    assert events == []
+
+
+def test_tracker_runtime_detects_ev_battery_grid_conflict_after_ten_minutes():
+    runtime = TrackerRuntime(DEFAULT_COORDINATOR_POLICY, config_entry=_make_entry())
+    now = datetime(2026, 3, 27, 12, 0, 0)
+
+    first = runtime.detect_unexpected_grid_events(
+        now=now,
+        strategy="SAVE_SOLAR",
+        grid_power=2200.0,
+        battery_power=-1800.0,
+        pv_power=3000.0,
+        load_power=400.0,
+        ev_charge_mode="solar_only",
+        ev_charging_power=3600.0,
+    )
+    battery_event = runtime.detect_unexpected_grid_events(
+        now=now + timedelta(minutes=1),
+        strategy="SAVE_SOLAR",
+        grid_power=2200.0,
+        battery_power=-1800.0,
+        pv_power=3000.0,
+        load_power=400.0,
+        ev_charge_mode="solar_only",
+        ev_charging_power=3600.0,
+    )
+    second = runtime.detect_unexpected_grid_events(
+        now=now + timedelta(minutes=9, seconds=30),
+        strategy="SAVE_SOLAR",
+        grid_power=2200.0,
+        battery_power=-1800.0,
+        pv_power=3000.0,
+        load_power=400.0,
+        ev_charge_mode="solar_only",
+        ev_charging_power=3600.0,
+    )
+    third = runtime.detect_unexpected_grid_events(
+        now=now + timedelta(minutes=10),
+        strategy="SAVE_SOLAR",
+        grid_power=2200.0,
+        battery_power=-1800.0,
+        pv_power=3000.0,
+        load_power=400.0,
+        ev_charge_mode="solar_only",
+        ev_charging_power=3600.0,
+    )
+
+    assert first == []
+    assert battery_event == ["unauthorized_battery_grid_charge"]
+    assert second == []
+    assert third == ["ev_battery_grid_conflict"]
+
+
+def test_handle_unexpected_grid_events_reapplies_safe_inverter_state():
+    coordinator = SolarFriendCoordinator.__new__(SolarFriendCoordinator)
+    coordinator._entry = _make_entry()
+    coordinator._policy = DEFAULT_COORDINATOR_POLICY
+    coordinator._tracker_runtime = TrackerRuntime(DEFAULT_COORDINATOR_POLICY, config_entry=coordinator._entry)
+    coordinator._startup_at = datetime(2026, 3, 27, 11, 0, 0)
+    coordinator._inverter = types.SimpleNamespace(
+        is_configured=True,
+        apply=AsyncMock(),
+    )
+    coordinator.ev_charge_mode = "solar_only"
+
+    data = SolarFriendData(
+        pv_power=1800.0,
+        grid_power=1200.0,
+        battery_power=-1600.0,
+        load_power=500.0,
+        ev_charging_power=0.0,
+        battery_weighted_cost=1.3,
+        battery_solar_fraction=0.4,
+        optimize_result=types.SimpleNamespace(strategy="SAVE_SOLAR"),
+    )
+    now = datetime(2026, 3, 27, 12, 0, 0)
+
+    asyncio.run(coordinator._handle_unexpected_grid_events(data=data, now=now))
+    asyncio.run(
+        coordinator._handle_unexpected_grid_events(
+            data=data,
+            now=now + timedelta(minutes=1),
+        )
+    )
+
+    coordinator._inverter.apply.assert_awaited_once()
+    result = coordinator._inverter.apply.await_args.args[0]
+    assert result.strategy == "IDLE"
+
+
+def test_handle_unexpected_grid_events_ignores_negative_import():
+    coordinator = SolarFriendCoordinator.__new__(SolarFriendCoordinator)
+    coordinator._entry = _make_entry()
+    coordinator._policy = DEFAULT_COORDINATOR_POLICY
+    coordinator._tracker_runtime = TrackerRuntime(DEFAULT_COORDINATOR_POLICY, config_entry=coordinator._entry)
+    coordinator._startup_at = datetime(2026, 3, 27, 11, 0, 0)
+    coordinator._inverter = types.SimpleNamespace(
+        is_configured=True,
+        apply=AsyncMock(),
+    )
+    coordinator.ev_charge_mode = "solar_only"
+
+    data = SolarFriendData(
+        pv_power=3000.0,
+        grid_power=2200.0,
+        battery_power=-1800.0,
+        load_power=400.0,
+        ev_charging_power=3600.0,
+        optimize_result=types.SimpleNamespace(strategy="NEGATIVE_IMPORT"),
+    )
+    now = datetime(2026, 3, 27, 12, 0, 0)
+
+    for offset in (0, 1, 10):
+        asyncio.run(
+            coordinator._handle_unexpected_grid_events(
+                data=data,
+                now=now + timedelta(minutes=offset),
+            )
+        )
+
+    coordinator._inverter.apply.assert_not_awaited()
 
 
 def test_async_update_data_skips_load_learning_while_sell_battery_active():

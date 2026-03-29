@@ -1811,6 +1811,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         if self._ev_enabled:
             self.data = data  # type: ignore[assignment]
             await self._update_ev()
+            await self._handle_unexpected_grid_events(data=data, now=now)
 
         if "load_power" in readings and load_learning_allowed:
             await self._maybe_update_profile(
@@ -1883,6 +1884,60 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             )
         except Exception as e:  # noqa: BLE001
             _LOGGER.warning("EV update fejlede: %s", e)
+
+    async def _handle_unexpected_grid_events(
+        self,
+        *,
+        data: SolarFriendData,
+        now: datetime,
+    ) -> None:
+        """Detect and handle persistent unexpected import/charging situations."""
+        if (now - self._startup_at) < timedelta(minutes=2):
+            return
+
+        strategy = data.optimize_result.strategy if data.optimize_result is not None else ""
+        events = self._ensure_tracker_runtime().detect_unexpected_grid_events(
+            now=now,
+            strategy=strategy,
+            grid_power=data.grid_power,
+            battery_power=data.battery_power,
+            pv_power=data.pv_power,
+            load_power=data.load_power,
+            ev_charge_mode=getattr(self, "ev_charge_mode", ""),
+            ev_charging_power=data.ev_charging_power,
+        )
+        for event in events:
+            if event == "unauthorized_battery_grid_charge":
+                _LOGGER.warning(
+                    "Unexpected battery grid charging detected: strategy=%s grid=%.0fW "
+                    "battery=%.0fW pv=%.0fW load=%.0fW ev=%.0fW. Re-applying safe inverter state.",
+                    strategy,
+                    data.grid_power,
+                    data.battery_power,
+                    data.pv_power,
+                    data.load_power,
+                    data.ev_charging_power,
+                )
+                if self._inverter is not None and self._inverter.is_configured:
+                    await self._inverter.apply(
+                        OptimizeResult.idle(
+                            "Unexpected battery charging under grid import - forcing safe inverter state",
+                            weighted_cost=data.battery_weighted_cost,
+                            solar_fraction=data.battery_solar_fraction,
+                        )
+                    )
+            elif event == "ev_battery_grid_conflict":
+                _LOGGER.warning(
+                    "Persistent EV/battery grid conflict detected: mode=%s strategy=%s grid=%.0fW "
+                    "battery=%.0fW pv=%.0fW load=%.0fW ev=%.0fW. EV runtime should have corrected this already.",
+                    getattr(self, "ev_charge_mode", ""),
+                    strategy,
+                    data.grid_power,
+                    data.battery_power,
+                    data.pv_power,
+                    data.load_power,
+                    data.ev_charging_power,
+                )
 
     async def _fetch_weather_hourly_forecast(self) -> list[dict[str, Any]]:
         """Fetch and cache hourly weather forecast for Solar Only profiling."""

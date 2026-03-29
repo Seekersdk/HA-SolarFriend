@@ -39,6 +39,11 @@ class CoordinatorPolicy:
     # this threshold. The coordinator uses it to block battery-selling while
     # Solar Only charging is consuming the available solar directly.
     ev_active_charge_w: float = 100.0
+    unexpected_grid_import_w: float = 500.0
+    unexpected_battery_charge_w: float = 500.0
+    unexpected_battery_grid_charge_duration: timedelta = timedelta(minutes=1)
+    unexpected_ev_grid_conflict_duration: timedelta = timedelta(minutes=10)
+    unexpected_grid_solar_margin_w: float = 300.0
 
 
 DEFAULT_COORDINATOR_POLICY = CoordinatorPolicy()
