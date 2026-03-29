@@ -8,6 +8,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as ha_dt
 
 _LOGGER = logging.getLogger(__name__)
 

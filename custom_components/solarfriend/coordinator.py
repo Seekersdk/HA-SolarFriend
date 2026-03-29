@@ -853,8 +853,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
 
         if selected_result.strategy == "ANTI_EXPORT":
             _LOGGER.warning(
-                "Negativ/nul spotpris %.4f kr/kWh — solar sell deaktiveret",
-                self.data.price,
+                "Negativ/nul salgspris %.4f kr/kWh — solar sell deaktiveret",
+                self.data.sell_price,
             )
 
         if self._inverter is not None and self._inverter.is_configured:
