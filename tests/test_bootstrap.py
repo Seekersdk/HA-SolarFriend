@@ -5,6 +5,8 @@ import asyncio
 import sys
 import types
 from datetime import datetime
+from datetime import timezone
+from datetime import timedelta
 
 # ---------------------------------------------------------------------------
 # Mock the homeassistant package before any SolarFriend import
@@ -621,5 +623,36 @@ def test_price_adapter_accepts_raw_today_when_raw_tomorrow_is_missing():
         assert snapshot.current_price == 1.267
         assert len(snapshot.points) == 2
         assert snapshot.to_legacy_raw_prices()[0]["price"] == 1.267
+    finally:
+        price_adapter_module.ha_dt.now = original_now
+
+
+def test_price_adapter_accepts_unknown_state_when_raw_today_exists():
+    """Unknown top-level state should not discard valid raw price attributes."""
+    import custom_components.solarfriend.price_adapter as price_adapter_module
+
+    original_now = price_adapter_module.ha_dt.now
+    price_adapter_module.ha_dt.now = lambda: datetime(
+        2026, 3, 29, 12, 15, 0, tzinfo=timezone(timedelta(hours=2))
+    )
+    try:
+        state = types.SimpleNamespace(
+            state="unknown",
+            attributes={
+                "raw_today": [
+                    {"hour": "2026-03-29T11:00:00+02:00", "price": -0.27},
+                    {"hour": "2026-03-29T12:00:00+02:00", "price": -0.59},
+                    {"hour": "2026-03-29T13:00:00+02:00", "price": -0.66},
+                ],
+                "raw_tomorrow": None,
+            },
+        )
+        hass = types.SimpleNamespace(states=types.SimpleNamespace(get=lambda entity_id: state))
+
+        snapshot = PriceAdapter.from_hass(hass, "sensor.price")
+
+        assert snapshot is not None
+        assert snapshot.current_price == -0.59
+        assert len(snapshot.points) == 3
     finally:
         price_adapter_module.ha_dt.now = original_now

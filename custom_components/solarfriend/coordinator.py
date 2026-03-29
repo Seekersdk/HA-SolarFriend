@@ -1681,18 +1681,24 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             or (now - self._last_optimize_dt) >= timedelta(hours=1)
         )
         startup_grace_active = (now - self._startup_at) < timedelta(minutes=2)
-        price_recovered_in_startup = (
+        startup_inputs_recovered = (
             startup_grace_active
             and not self._startup_price_recovery_optimize_done
             and data.price_data is not None
             and data.price_data.current_price is not None
-            and (prev_data is None or prev_data.price_data is None)
+            and data.forecast_data is not None
+            and (
+                prev_data is None
+                or prev_data.price_data is None
+                or prev_data.price_data.current_price is None
+                or prev_data.forecast_data is None
+            )
         )
-        if price_recovered_in_startup:
+        if startup_inputs_recovered:
             self._startup_price_recovery_optimize_done = True
             self.data = data  # type: ignore[assignment]
             await self._trigger_optimize(
-                "startup-price-recovered",
+                "startup-inputs-recovered",
                 notify=False,
                 force=True,
             )

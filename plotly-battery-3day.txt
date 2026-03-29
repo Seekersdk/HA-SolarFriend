@@ -1,6 +1,6 @@
 type: custom:plotly-graph
 hours_to_show: 72h
-time_offset: 0h
+time_offset: +36h
 refresh_interval: 30
 ha_theme: true
 autorange_after_scroll: true

@@ -498,6 +498,115 @@ def test_async_update_data_reads_states_and_publishes_cleaned_ev_load():
     assert data.advanced_consumption_model_last_weather["condition"] == "sunny"
 
 
+def test_async_update_data_triggers_optimize_when_forecast_recovers_during_startup():
+    hass = _FakeHass(
+        states={
+            "sensor.pv_power": _FakeState("6000"),
+            "sensor.grid_power": _FakeState("-500"),
+            "sensor.battery_soc": _FakeState("82"),
+            "sensor.battery_power": _FakeState("0"),
+            "sensor.total_load": _FakeState("5000"),
+            "sun.sun": _FakeState("above_horizon", {"next_setting": "2026-03-27T18:30:00"}),
+        }
+    )
+    entry = _make_entry(ev_charging_enabled=False)
+    coordinator = SolarFriendCoordinator.__new__(SolarFriendCoordinator)
+    coordinator.hass = hass
+    coordinator._entry = entry
+    coordinator._policy = DEFAULT_COORDINATOR_POLICY
+    coordinator.data = importlib.import_module("custom_components.solarfriend.coordinator_models").SolarFriendData()
+    coordinator.data.price_data = PriceData(current_price=1.25, source_entity="sensor.buy_price")
+    coordinator.data.forecast_data = None
+    coordinator._state_reader = SolarFriendStateReader(hass, entry)
+    coordinator._price_runtime = types.SimpleNamespace(
+        resolve_snapshot=lambda now, cache_kind, fresh_snapshot, normalize: fresh_snapshot,
+        update_history=lambda price: None,
+        record_night_price=lambda hour, price: None,
+        price_average=lambda: 1.0,
+        battery_strategy=lambda solar_surplus, price, avg_price: "IDLE",
+        min_night_price=lambda: 0.5,
+        price_level=lambda price, avg_price: "NORMAL",
+    )
+    coordinator._profile = types.SimpleNamespace(
+        confidence="READY",
+        days_collected=7,
+        _profiles={
+            "weekday": [{"avg_watt": 800.0, "samples": 5} for _ in range(24)],
+            "weekend": [{"avg_watt": 900.0, "samples": 5} for _ in range(24)],
+        },
+        build_debug_snapshot=lambda: {"status": "ok"},
+    )
+    coordinator._tracker = None
+    coordinator._forecast_tracker = None
+    coordinator._forecast_correction_model = None
+    coordinator._solar_installation_profile = None
+    coordinator._solar_installation_profiles = {}
+    coordinator._optimizer = types.SimpleNamespace(get_last_plan=lambda: [])
+    coordinator._last_optimize_dt = datetime(2026, 3, 27, 11, 59, 30)
+    coordinator._last_plan_optimize_result = None
+    coordinator._shadow_log_enabled = False
+    coordinator._shadow_logger = types.SimpleNamespace(build_payload=lambda *a, **kw: {})
+    coordinator.advanced_consumption_model_enabled = False
+    coordinator._advanced_consumption_model = AdvancedConsumptionModel()
+    coordinator._weather_service = types.SimpleNamespace(
+        async_get_current_hour_snapshot=lambda now: asyncio.sleep(
+            0,
+            result={
+                "condition": "sunny",
+                "cloud_coverage_pct": 10.0,
+                "temperature_c": 12.0,
+                "precipitation_mm": 0.0,
+                "wind_speed_mps": 3.0,
+                "wind_bearing_deg": 180.0,
+                "is_daylight": True,
+                "is_heating_season": True,
+            },
+        ),
+        async_fetch_hourly_forecast=lambda: asyncio.sleep(0, result=[]),
+    )
+    coordinator._ev_enabled = False
+    coordinator._update_ev = lambda **kwargs: asyncio.sleep(0)
+    coordinator._update_tracker = lambda **kwargs: asyncio.sleep(0)
+    coordinator._update_forecast_tracker = lambda **kwargs: asyncio.sleep(0)
+    coordinator._maybe_update_profile = lambda *a, **kw: asyncio.sleep(0)
+    coordinator._append_shadow_log = lambda payload: asyncio.sleep(0)
+    coordinator._build_shadow_payload = lambda *a, **kw: {}
+    coordinator._should_trigger_plan_deviation_replan = lambda **kwargs: False
+    coordinator._build_battery_plan = lambda data, now: []
+    triggered_reasons: list[str] = []
+
+    async def _fake_trigger_optimize(reason: str = "event", **kwargs):
+        triggered_reasons.append(reason)
+
+    coordinator._trigger_optimize = _fake_trigger_optimize
+    coordinator._clean_live_house_load = SolarFriendCoordinator._clean_live_house_load.__get__(coordinator)
+    _prime_runtime_test_coordinator(coordinator)
+    coordinator._startup_at = datetime(2026, 3, 27, 11, 59, 0)
+
+    from custom_components.solarfriend import coordinator as coordinator_mod
+
+    original_price_adapter = coordinator_mod.PriceAdapter.from_hass
+    original_forecast_adapter = coordinator_mod.ForecastAdapter.from_hass
+    original_now = coordinator_mod.ha_dt.now
+    coordinator_mod.ha_dt.now = lambda: datetime(2026, 3, 27, 12, 0, 0)
+    coordinator_mod.PriceAdapter.from_hass = staticmethod(
+        lambda hass_obj, entity_id: PriceData(current_price=1.25, source_entity=entity_id)
+    )
+
+    async def _fake_forecast_from_hass(**kwargs):
+        return _FakeForecastData()
+
+    coordinator_mod.ForecastAdapter.from_hass = staticmethod(_fake_forecast_from_hass)
+    try:
+        asyncio.run(coordinator._async_update_data())
+    finally:
+        coordinator_mod.ha_dt.now = original_now
+        coordinator_mod.PriceAdapter.from_hass = original_price_adapter
+        coordinator_mod.ForecastAdapter.from_hass = original_forecast_adapter
+
+    assert triggered_reasons == ["startup-inputs-recovered"]
+
+
 def test_async_update_data_wires_solar_profile_snapshot_fields():
     hass = _FakeHass(
         states={

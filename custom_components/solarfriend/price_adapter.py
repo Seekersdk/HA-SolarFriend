@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.util import dt as ha_dt
@@ -21,7 +21,8 @@ _PRICE_MAX_DKK = 50.0   # Far above any realistic Danish spot price
 def _to_local_aware(dt: datetime) -> datetime:
     """Return a timezone-aware datetime in local time."""
     if dt.tzinfo is None:
-        return ha_dt.as_local(dt.replace(tzinfo=ha_dt.UTC))
+        tz = getattr(ha_dt, "UTC", None) or timezone.utc
+        return ha_dt.as_local(dt.replace(tzinfo=tz))
     return ha_dt.as_local(dt)
 
 
@@ -119,12 +120,10 @@ class PriceAdapter:
             return None
 
         state = hass.states.get(price_sensor_entity)
-        if state is None or state.state in ("unavailable", "unknown", ""):
+        if state is None:
             return None
 
-        now = ha_dt.now()
         raw_prices: list[dict[str, Any]] = []
-
         raw_today = state.attributes.get("raw_today", []) or []
         raw_tomorrow = state.attributes.get("raw_tomorrow", []) or []
         if isinstance(raw_today, list):
@@ -138,6 +137,11 @@ class PriceAdapter:
                 if isinstance(candidate, list) and candidate:
                     raw_prices = candidate
                     break
+
+        if state.state in ("unavailable", "unknown", "") and not raw_prices:
+            return None
+
+        now = ha_dt.now()
 
         points: list[PricePoint] = []
         previous_start: datetime | None = None
