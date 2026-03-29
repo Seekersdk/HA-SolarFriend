@@ -296,12 +296,16 @@ class BatteryOptimizer:
                         continue
                     next_stored_units = stored_after_solar - discharge_units + charge_units
                     grid_import_units = max(0, net_load_units[slot_idx] - discharge_to_load_units) + charge_units
+                    sell_credit = max(
+                        0.0,
+                        float(slots[slot_idx]["sell_price"]) - self.min_charge_saving,
+                    )
                     step_cost = (
                         (grid_import_units * quantum_kwh * slots[slot_idx]["price"])
                         + (charge_units * quantum_kwh * self.battery_cost_per_kwh)
                         + (solar_stored_units * quantum_kwh * slots[slot_idx]["sell_price"])
                         + (discharge_units * quantum_kwh * weighted_cost)
-                        - (export_units * quantum_kwh * slots[slot_idx]["sell_price"])
+                        - (export_units * quantum_kwh * sell_credit)
                     )
                     future_cost, future_actions = _solve(slot_idx + 1, next_stored_units)
                     total_cost = step_cost + future_cost
@@ -332,6 +336,12 @@ class BatteryOptimizer:
             )
             discharge_to_load_kwh = min(slot["net_load_kwh"], discharge_total_kwh)
             battery_export_kwh = max(0.0, discharge_total_kwh - discharge_to_load_kwh)
+            if battery_export_kwh > 0:
+                sell_spread = float(slot["sell_price"]) - weighted_cost
+                if sell_spread < self.min_charge_saving:
+                    stored_kwh += battery_export_kwh
+                    discharge_total_kwh = discharge_to_load_kwh
+                    battery_export_kwh = 0.0
             stored_kwh -= discharge_total_kwh
             grid_import_kwh = max(0.0, slot["net_load_kwh"] - discharge_to_load_kwh)
 
