@@ -173,6 +173,8 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._prev_update_time: datetime | None = None
         self._last_tracker_save: datetime | None = None
         self._last_forecast_tracker_save: datetime | None = None
+        self._last_forecast_correction_save: datetime | None = None
+        self._last_solar_profile_save: datetime | None = None
         self._last_soc_correction: datetime | None = None
 
         # Optimizer state
@@ -1284,6 +1286,64 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             self._tracker_runtime = TrackerRuntime(self._policy, config_entry=self._entry)
         return self._tracker_runtime
 
+    async def _maybe_persist_forecast_correction_model(
+        self,
+        *,
+        now: datetime,
+        pv_power: float,
+    ) -> None:
+        """Persist Track-1 learning often enough that early buckets survive reloads."""
+        if self._forecast_correction_model is None:
+            return
+        if not hasattr(self, "_last_forecast_correction_save"):
+            self._last_forecast_correction_save = None
+
+        save_interval = (
+            timedelta(minutes=1)
+            if pv_power > self._policy.battery_noise_w
+            else timedelta(minutes=15)
+        )
+        if (
+            self._last_forecast_correction_save is not None
+            and (now - self._last_forecast_correction_save) < save_interval
+        ):
+            return
+
+        await self._forecast_correction_model.async_save()
+        self._last_forecast_correction_save = now
+
+    async def _maybe_persist_solar_installation_profiles(
+        self,
+        *,
+        now: datetime,
+        pv_power: float,
+        profiles: dict[str, SolarInstallationProfile],
+        slot_finalized: bool,
+    ) -> None:
+        """Persist Track-2 learning often enough that reloads do not wipe progress."""
+        if not profiles:
+            return
+        if not hasattr(self, "_last_solar_profile_save"):
+            self._last_solar_profile_save = None
+
+        save_interval = (
+            timedelta(minutes=1)
+            if pv_power > self._policy.battery_noise_w
+            else timedelta(minutes=15)
+        )
+        if (
+            not slot_finalized
+            and self._last_solar_profile_save is not None
+            and (now - self._last_solar_profile_save) < save_interval
+        ):
+            return
+
+        for profile in profiles.values():
+            if profile is None:
+                continue
+            await profile.async_save()
+        self._last_solar_profile_save = now
+
     async def _update_tracker(
         self,
         now: datetime,
@@ -1572,6 +1632,10 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                 solar_elevation=solar_elevation,
                 solar_azimuth=solar_azimuth,
             )
+            await self._maybe_persist_forecast_correction_model(
+                now=now,
+                pv_power=data.pv_power,
+            )
 
         solar_profiles = getattr(self, "_solar_installation_profiles", {})
         active_solar_profiles = (
@@ -1584,6 +1648,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             )
         )
         finalized_solar_slot: dict[str, Any] | None = None
+        solar_profile_slot_finalized = False
         if active_solar_profiles and solar_elevation is not None and solar_azimuth is not None:
             _dt = (
                 0.0
@@ -1604,6 +1669,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
                         data.forecast_data.hourly_forecast if data.forecast_data else [], now
                     ),
                 )
+                solar_profile_slot_finalized = solar_profile_slot_finalized or finalized is not None
                 if finalized_solar_slot is None and finalized is not None:
                     finalized_solar_slot = finalized
 
@@ -1664,6 +1730,12 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         )
 
         # ── Consumption profile chart (24h curve) ────────────────────────────
+        await self._maybe_persist_solar_installation_profiles(
+            now=now,
+            pv_power=data.pv_power,
+            profiles=active_solar_profiles,
+            slot_finalized=solar_profile_slot_finalized,
+        )
         snapshot_builder.apply_consumption_profile_chart(
             data=data,
             now=now,
