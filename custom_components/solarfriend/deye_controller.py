@@ -86,6 +86,11 @@ class DeyeController(InverterController):
         future = ha_dt.now() + timedelta(hours=hours_ahead)
         return future.hour * 100 + future.minute
 
+    @staticmethod
+    def _desired_solar_sell_enabled(strategy: str) -> bool:
+        """Only enable solar sell when the current strategy intends grid export."""
+        return strategy == "SELL_BATTERY"
+
     def _with_default_discharge_limit(self, expected: dict[str, str | float]) -> dict[str, str | float]:
         """Add the configured restore discharge limit when the entity exists."""
         if self._max_battery_discharge_current:
@@ -103,6 +108,12 @@ class DeyeController(InverterController):
         """Return the expected live inverter state for the current strategy."""
         current_hhmm = self._current_hhmm()
         target_soc = int(result.target_soc) if result.target_soc is not None else 80
+        expected: dict[str, str | float] = {}
+
+        if self._solar_sell:
+            expected[self._solar_sell] = (
+                "on" if self._desired_solar_sell_enabled(result.strategy) else "off"
+            )
 
         if result.strategy == "CHARGE_NIGHT":
             raw = result.cheapest_charge_hour
@@ -113,7 +124,7 @@ class DeyeController(InverterController):
                     tp_start = int(parts[0]) * 100 + int(parts[1])
                 except (ValueError, IndexError):
                     tp_start = 0
-            return self._with_default_discharge_limit({
+            expected.update(self._with_default_discharge_limit({
                 self._grid_charge: "on",
                 self._time_of_use: "on",
                 self._tp1_enable: "on",
@@ -122,9 +133,10 @@ class DeyeController(InverterController):
                 self._charge_current: 25.0,
                 self._energy_priority: "Battery first",
                 self._limit_control_mode: "Zero export to CT",
-            })
+            }))
+            return expected
         if result.strategy == "CHARGE_GRID":
-            return self._with_default_discharge_limit({
+            expected.update(self._with_default_discharge_limit({
                 self._grid_charge: "on",
                 self._time_of_use: "on",
                 self._tp1_enable: "on",
@@ -133,9 +145,10 @@ class DeyeController(InverterController):
                 self._charge_current: 25.0,
                 self._energy_priority: "Battery first",
                 self._limit_control_mode: "Zero export to CT",
-            })
+            }))
+            return expected
         if result.strategy == "USE_BATTERY":
-            return self._with_default_discharge_limit({
+            expected.update(self._with_default_discharge_limit({
                 self._grid_charge: "off",
                 self._time_of_use: "on",
                 self._tp1_enable: "on",
@@ -143,9 +156,10 @@ class DeyeController(InverterController):
                 self._tp1_capacity: float(int(self._battery_min_soc)),
                 self._energy_priority: "Load first",
                 self._limit_control_mode: "Zero export to CT",
-            })
+            }))
+            return expected
         if result.strategy == "SELL_BATTERY":
-            return self._with_default_discharge_limit({
+            expected.update(self._with_default_discharge_limit({
                 self._grid_charge: "off",
                 self._time_of_use: "on",
                 self._tp1_enable: "on",
@@ -153,19 +167,21 @@ class DeyeController(InverterController):
                 self._tp1_capacity: float(int(self._battery_min_soc)),
                 self._energy_priority: "Load first",
                 self._limit_control_mode: "Selling first",
-            })
+            }))
+            return expected
         if result.strategy == "EV_HOLD_BATTERY":
             if self._max_battery_discharge_current:
-                return {
+                expected.update({
                     self._grid_charge: "off",
                     self._time_of_use: "off",
                     self._tp1_enable: "off",
                     self._energy_priority: "Load first",
                     self._limit_control_mode: "Zero export to CT",
                     self._max_battery_discharge_current: 0.0,
-                }
+                })
+                return expected
             target_soc = int(result.target_soc) if result.target_soc is not None else 100
-            return {
+            expected.update({
                 self._grid_charge: "off",
                 self._time_of_use: "on",
                 self._tp1_enable: "on",
@@ -173,33 +189,37 @@ class DeyeController(InverterController):
                 self._tp1_capacity: float(target_soc),
                 self._energy_priority: "Load first",
                 self._limit_control_mode: "Zero export to CT",
-            }
+            })
+            return expected
         if result.strategy == "NEGATIVE_IMPORT":
             if self._max_battery_discharge_current:
-                return {
+                expected.update({
                     self._grid_charge: "off",
                     self._time_of_use: "off",
                     self._tp1_enable: "off",
                     self._energy_priority: "Load first",
                     self._limit_control_mode: "Zero export to load",
                     self._max_battery_discharge_current: 0.0,
-                }
-            return {
+                })
+                return expected
+            expected.update({
                 self._grid_charge: "off",
                 self._time_of_use: "off",
                 self._tp1_enable: "off",
                 self._energy_priority: "Load first",
                 self._limit_control_mode: "Zero export to load",
-            }
+            })
+            return expected
         if result.strategy in {"IDLE", "SAVE_SOLAR", "ANTI_EXPORT"}:
-            return self._with_default_discharge_limit({
+            expected.update(self._with_default_discharge_limit({
                 self._grid_charge: "off",
                 self._time_of_use: "off",
                 self._tp1_enable: "off",
                 self._energy_priority: "Load first",
                 self._limit_control_mode: "Zero export to CT",
-            })
-        return {}
+            }))
+            return expected
+        return expected
 
     def _live_state_matches(self, result: OptimizeResult) -> bool:
         """Return True when the inverter already matches the desired state."""
@@ -243,32 +263,25 @@ class DeyeController(InverterController):
             result.reason,
         )
 
+        await self._set_solar_sell(self._desired_solar_sell_enabled(result.strategy))
+
         if result.strategy == "ANTI_EXPORT":
-            await self._set_solar_sell(False)
             await self._apply_idle()
         elif result.strategy == "NEGATIVE_IMPORT":
-            await self._set_solar_sell(False)
             await self._apply_negative_import()
         elif result.strategy == "CHARGE_NIGHT":
-            await self._set_solar_sell(True)
             await self._apply_charge_night(result)
         elif result.strategy == "USE_BATTERY":
-            await self._set_solar_sell(True)
             await self._apply_use_battery()
         elif result.strategy == "SELL_BATTERY":
-            await self._set_solar_sell(True)
             await self._apply_sell_battery()
         elif result.strategy == "SAVE_SOLAR":
-            await self._set_solar_sell(True)
             await self._apply_idle()
         elif result.strategy == "EV_HOLD_BATTERY":
-            await self._set_solar_sell(True)
             await self._apply_ev_hold_battery(result)
         elif result.strategy == "CHARGE_GRID":
-            await self._set_solar_sell(True)
             await self._apply_charge_grid(result)
         elif result.strategy == "IDLE":
-            await self._set_solar_sell(True)
             await self._apply_idle()
 
         self._last_signature = signature
