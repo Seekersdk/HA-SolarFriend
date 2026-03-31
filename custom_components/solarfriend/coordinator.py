@@ -173,6 +173,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         self._prev_update_time: datetime | None = None
         self._last_tracker_save: datetime | None = None
         self._last_forecast_tracker_save: datetime | None = None
+        self._last_advanced_consumption_save: datetime | None = None
         self._last_forecast_correction_save: datetime | None = None
         self._last_solar_profile_save: datetime | None = None
         self._last_soc_correction: datetime | None = None
@@ -1312,6 +1313,25 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
         await self._forecast_correction_model.async_save()
         self._last_forecast_correction_save = now
 
+    async def _maybe_persist_advanced_consumption_model(
+        self,
+        *,
+        now: datetime,
+    ) -> None:
+        """Checkpoint the advanced consumption model so reloads do not wipe records."""
+        if not self.advanced_consumption_model_enabled:
+            return
+        if not hasattr(self, "_last_advanced_consumption_save"):
+            self._last_advanced_consumption_save = None
+        if (
+            self._last_advanced_consumption_save is not None
+            and (now - self._last_advanced_consumption_save) < timedelta(minutes=5)
+        ):
+            return
+
+        await self._advanced_consumption_model.async_save(self.hass)
+        self._last_advanced_consumption_save = now
+
     async def _maybe_persist_solar_installation_profiles(
         self,
         *,
@@ -1835,6 +1855,7 @@ class SolarFriendCoordinator(DataUpdateCoordinator[SolarFriendData]):
             load_learning_allowed=load_learning_allowed,
             weather_snapshot=weather_snapshot,
         )
+        await self._maybe_persist_advanced_consumption_model(now=now)
 
         snapshot_builder.apply_profile_debug(data=data, profile=self._profile)
         evaluation_logger = getattr(self, "_model_evaluation_logger", None)
