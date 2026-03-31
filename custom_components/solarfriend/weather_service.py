@@ -33,6 +33,27 @@ def _wind_speed_to_mps(value: Any, unit: str | None) -> float | None:
     return numeric
 
 
+def _build_snapshot_from_sources(
+    *,
+    now_local: datetime,
+    source: dict[str, Any],
+    wind_speed_unit: str | None,
+) -> dict[str, Any]:
+    """Normalize weather fields from either hourly forecast or current weather state."""
+    month = now_local.month
+    return {
+        "condition": source.get("condition"),
+        "cloud_coverage_pct": source.get("cloud_coverage"),
+        "temperature_c": source.get("temperature"),
+        "precipitation_mm": source.get("precipitation"),
+        "wind_speed_mps": _wind_speed_to_mps(source.get("wind_speed"), wind_speed_unit),
+        "wind_bearing_deg": source.get("wind_bearing"),
+        "humidity_pct": source.get("humidity"),
+        "is_daylight": bool(6 <= now_local.hour < 22),
+        "is_heating_season": bool(month in (10, 11, 12, 1, 2, 3, 4)),
+    }
+
+
 class WeatherProfileService:
     """Fetch and cache hourly weather forecast for Solar Only profiling."""
 
@@ -100,15 +121,17 @@ class WeatherProfileService:
     async def async_get_current_hour_snapshot(self, now: datetime) -> dict[str, Any]:
         """Return a compact weather snapshot for the current hour."""
         hourly_forecast = await self.async_fetch_hourly_forecast()
-        if not hourly_forecast:
-            return {}
         now_local = ha_dt.as_local(now) if now.tzinfo is not None else ha_dt.as_local(now.replace(tzinfo=ha_dt.UTC))
 
         weather_state = self._hass.states.get(self._weather_entity) if self._weather_entity else None
         wind_speed_unit = None
+        state_attrs: dict[str, Any] = {}
         if weather_state is not None:
             wind_speed_unit = weather_state.attributes.get("wind_speed_unit")
+            state_attrs = dict(weather_state.attributes)
+            state_attrs.setdefault("condition", getattr(weather_state, "state", None))
 
+        fallback_entry: dict[str, Any] | None = None
         for entry in hourly_forecast:
             raw_start = entry.get("datetime")
             if raw_start is None:
@@ -119,16 +142,24 @@ class WeatherProfileService:
             except (ValueError, TypeError):
                 continue
             if start <= now_local < start + timedelta(hours=1):
-                month = now_local.month
-                return {
-                    "condition": entry.get("condition"),
-                    "cloud_coverage_pct": entry.get("cloud_coverage"),
-                    "temperature_c": entry.get("temperature"),
-                    "precipitation_mm": entry.get("precipitation"),
-                    "wind_speed_mps": _wind_speed_to_mps(entry.get("wind_speed"), wind_speed_unit),
-                    "wind_bearing_deg": entry.get("wind_bearing"),
-                    "humidity_pct": entry.get("humidity"),
-                    "is_daylight": bool(6 <= now_local.hour < 22),
-                    "is_heating_season": bool(month in (10, 11, 12, 1, 2, 3, 4)),
-                }
+                return _build_snapshot_from_sources(
+                    now_local=now_local,
+                    source=entry,
+                    wind_speed_unit=wind_speed_unit,
+                )
+            if fallback_entry is None and start > now_local:
+                fallback_entry = entry
+
+        if fallback_entry is not None:
+            return _build_snapshot_from_sources(
+                now_local=now_local,
+                source=fallback_entry,
+                wind_speed_unit=wind_speed_unit,
+            )
+        if state_attrs:
+            return _build_snapshot_from_sources(
+                now_local=now_local,
+                source=state_attrs,
+                wind_speed_unit=wind_speed_unit,
+            )
         return {}
